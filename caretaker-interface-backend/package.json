@@ -1,0 +1,15 @@
+{
+  "name": "caretaker-interface-backend",
+  "version": "1.0.0",
+  "description": "Backend for the Smart Assistive Cap Caretaker Console",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "license": "UNLICENSED",
+  "private": true,
+  "dependencies": {
+    "cors": "^2.8.6",
+    "express": "^5.2.1"
+  }
+}
