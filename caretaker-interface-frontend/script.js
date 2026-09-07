@@ -130,8 +130,10 @@ function handleLocationUpdate(latitude, longitude, timestamp) {
     if (longitudeEl) longitudeEl.textContent = longitude.toFixed(4);
 
     const locationTimestampEl = document.getElementById('locationTimestamp');
-    if (locationTimestampEl && currentLocation.timestamp) {
-        locationTimestampEl.textContent = formatTime(currentLocation.timestamp);
+    const phoneLastUpdateEl = document.getElementById('phoneLastUpdate');
+    if (currentLocation.timestamp) {
+        if (locationTimestampEl) locationTimestampEl.textContent = formatTime(currentLocation.timestamp);
+        if (phoneLastUpdateEl) phoneLastUpdateEl.textContent = formatTime(currentLocation.timestamp);
     }
 
     const srcEl = document.getElementById('locationSource');
@@ -1064,48 +1066,12 @@ async function fetchLocationFromAPI() {
     return data;
 }
 
-async function postLocationToAPI(latitude, longitude, timestamp) {
-    try {
-        const response = await fetch(LOCATION_ENDPOINT, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
-            body: JSON.stringify({ latitude, longitude, timestamp: timestamp || new Date().toISOString() })
-        });
-        if (!response.ok) {
-            throw new Error(`HTTP ${response.status}`);
-        }
-    } catch (error) {
-        console.warn('[Location] Failed to publish browser GPS:', error.message || error);
-    }
-}
-
-function publishBrowserLocation() {
-    if (!isLocationPollingRunning) return;
-    if (!navigator.geolocation) {
-        console.warn('[Location] navigator.geolocation is not available in this browser.');
-        return;
-    }
-    navigator.geolocation.getCurrentPosition(
-        (position) => {
-            postLocationToAPI(
-                position.coords.latitude,
-                position.coords.longitude,
-                new Date(position.timestamp).toISOString()
-            );
-        },
-        (err) => {
-            console.warn('[Location] Browser geolocation error:', err && err.message);
-        },
-        { enableHighAccuracy: true, timeout: 10000, maximumAge: 30000 }
-    );
-}
-
 function startLocationPolling() {
     if (isLocationPollingRunning) return;
 
     isLocationPollingRunning = true;
     locationPollingEpoch += 1;
-    publishBrowserLocation();
+    setLocationStatus('pending');
     locationPollLoop(locationPollingEpoch);
 }
 
@@ -1119,15 +1085,15 @@ function setLocationStatus(state) {
 
     if (!isLocationPollingRunning) {
         dot.style.backgroundColor = 'var(--text-3)';
-        label.textContent = 'Disconnected';
+        label.textContent = 'Waiting for phone';
     } else {
-        const statusLabel = state === 'connected' ? 'Connected' : state === 'offline' ? 'Offline' : 'Polling…';
+        const statusLabel = state === 'connected' ? 'Connected' : state === 'offline' ? 'Offline' : 'Waiting for phone';
         dot.style.backgroundColor = state === 'connected' ? 'var(--ok)' : state === 'offline' ? 'var(--emergency)' : 'var(--warn)';
         label.textContent = statusLabel;
     }
 
     if (toggleBtn) {
-        toggleBtn.textContent = isLocationPollingRunning ? 'Disconnect Location' : 'Connect Location';
+        toggleBtn.textContent = isLocationPollingRunning ? 'Disconnect' : 'Connect';
         toggleBtn.className = isLocationPollingRunning ? 'btn btn-outline' : 'btn btn-primary';
     }
 }

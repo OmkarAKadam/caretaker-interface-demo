@@ -17,17 +17,54 @@ Base URL: `http://localhost:3000`
 | GET    | `/api/health`         | Health check                                   |
 | GET    | `/api/events`         | Retrieve all stored events                     |
 | POST   | `/api/events`         | **Create a new hardware/alert event**          |
+| GET    | `/api/events/stream`  | **SSE stream** — live events broadcast as they are created |
 | PATCH  | `/api/events/:alertId`| Update the status of one event (caretaker-only)|
 | GET    | `/api/location`       | Retrieve the latest phone GPS location         |
 | POST   | `/api/location`       | Publish the phone's current GPS location       |
 
 ---
 
+## SSE event stream
+
+`GET /api/events/stream` is a **Server-Sent Events** (SSE) endpoint. Whenever a new event is
+created via `POST /api/events`, the backend broadcasts it to every connected SSE client.
+
+The ESP32 **does not** use SSE or MQTT — it only talks to the backend over REST. The backend
+distributes events to its clients:
+
+```
+ESP32 ──REST──► Backend ──SSE──► Voice Client (phone) → TTS speech
+                          └─► Caretaker Dashboard
+```
+
+### GET /api/events/stream
+
+```http
+GET /api/events/stream
+```
+
+Response headers: `Content-Type: text/event-stream`. SSE format:
+
+```sse
+event: event
+data: {"trigger":"OBSTACLE_LEFT","alertId":"...","latitude":22.3072,"longitude":73.1812,"timestamp":"...","status":"ACTIVE"}
+```
+
+The `data` payload is the **full stored event object** (same shape as `POST /api/events`
+returns). Disconnected clients are cleaned up automatically; clients reconnect with
+`retry: 3000`.
+
 ## Phone GPS endpoints
 
 The **user's mobile phone is the authoritative GPS source**. The phone publishes its
 current coordinates, and the backend stores them as the *latest location* used to enrich
 incoming hardware events that omit coordinates. This requires no GPS hardware on the ESP32.
+
+> **Who posts location:** `POST /api/location` is intended for the **remote blind-person
+> phone GPS client** (see the `blind-phone/` client in the frontend). The **caretaker
+> dashboard is only a consumer** of location — it reads `GET /api/location` and events
+> enriched with phone coordinates, and it **must never publish its own browser GPS** to this
+> endpoint. The caretaker computer is never the source of the blind person's location.
 
 ### POST /api/location — publish phone GPS
 
@@ -115,7 +152,7 @@ The ESP32 reports a hardware event by `POST`-ing JSON to this endpoint.
 | Field       | Type            | Required | Notes                                               |
 |-------------|-----------------|----------|-----------------------------------------------------|
 | `alertId`   | string          | yes      | Unique non-empty id. Duplicate → `409`.            |
-| `trigger`   | string          | yes      | One of `SOS`, `HEART_RATE`, `SOS_AND_HEART_RATE`, `NORMAL`. |
+| `trigger`   | string          | yes      | One of `SOS`, `HEART_RATE`, `SOS_AND_HEART_RATE`, `NORMAL`, `OBSTACLE_LEFT`, `OBSTACLE_CENTER`, `OBSTACLE_RIGHT`. |
 | `status`    | string          | yes      | One of `NORMAL`, `ACTIVE`, `ACKNOWLEDGED`, `RESOLVED`. Hardware events normally enter as `ACTIVE`. |
 | `heartRate` | number \| null  | yes      | `null` allowed. MAX30102 is optional — do not require it. |
 | `latitude`  | number          | no*      | Between `-90` and `90`. *Optional if a phone location is available (enrichment); required otherwise. |
@@ -179,6 +216,31 @@ The ESP32 reports a hardware event by `POST`-ing JSON to this endpoint.
   "timestamp": "2026-09-07T15:03:00"
 }
 ```
+
+#### OBSTACLE_LEFT / OBSTACLE_CENTER / OBSTACLE_RIGHT — ultrasonic obstacle detection
+
+The **mobile voice client** listens for these on the SSE stream and speaks them aloud:
+
+| Trigger            | Spoken text              |
+|--------------------|--------------------------|
+| `OBSTACLE_LEFT`    | "Obstacle on your left"  |
+| `OBSTACLE_CENTER`  | "Obstacle ahead"         |
+| `OBSTACLE_RIGHT`   | "Obstacle on your right" |
+
+```json
+{
+  "alertId": "ALT-ESP32-OBST-001",
+  "trigger": "OBSTACLE_LEFT",
+  "status": "ACTIVE",
+  "heartRate": null,
+  "latitude": 22.3072,
+  "longitude": 73.1812,
+  "timestamp": "2026-09-07T15:04:00"
+}
+```
+
+The event flows through the same pipeline as any other trigger:
+`POST /api/events` → backend → SSE → voice client → TTS speech.
 
 ### Response codes
 
@@ -293,17 +355,18 @@ Example JSON the ESP32 would send for a plain SOS press:
 
 ---
 
-## Ultrasonic sensor status (API-contract gap)
+## Ultrasonic sensor status (API-contract resolved)
 
 The hardware includes forward and downward ultrasonic sensors intended for
 obstacle / ground-hazard detection.
 
-The current backend/frontend contract does **not** define an ultrasonic trigger, and this
-document does **not** invent one (no `OBSTACLE`, `CURB`, `STEP`, `ULTRASONIC` trigger).
-If the ultrasonic sensors must surface as events, the project contract needs to decide
-before hardware integration whether to:
+**This contract now defines obstacle triggers** — the mobile voice client speaks them:
 
-- map them to a new `trigger` value (would require backend validation + frontend display updates), or
-- keep them internal to future navigation logic and not report them as alert events.
+- `OBSTACLE_LEFT` → "Obstacle on your left"
+- `OBSTACLE_CENTER` → "Obstacle ahead"
+- `OBSTACLE_RIGHT` → "Obstacle on your right"
 
-This is an **open API-contract gap** to resolve before the ESP32 teammate writes ultrasonic-raising code.
+Obstacle events are normal alert events: the ESP32 `POST`s them to `/api/events`, the backend
+broadcasts them over the SSE stream, and the voice client (phone) turns them into spoken
+alerts. Ground-hazard events (curb / step detection) are **not yet defined**; if they must
+surface as events, add triggers to the validator and document them here.

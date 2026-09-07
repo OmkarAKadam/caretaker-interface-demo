@@ -1,0 +1,155 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Blind Person GPS Client</title>
+    <meta name="theme-color" content="#faf7f2">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+    <div class="phone-shell">
+        <header class="phone-header">
+            <div class="brand">
+                <div class="brand-mark">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M13 2 3 14h7l-1 8 10-12h-7l1-8z"></path></svg>
+                </div>
+                <div class="brand-text">
+                    <b>SmartAssist</b>
+                    <span>Blind Person GPS Client</span>
+                </div>
+            </div>
+            <div class="status-pill" id="modeChip">
+                <span class="status-dot"></span>
+                <span id="modeLabel">Not sharing</span>
+            </div>
+        </header>
+
+        <main class="phone-main">
+            <section class="card gps-card" id="gpsCard">
+                <div class="gps-top">
+                    <div class="gps-icon" id="gpsIcon">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2a10 10 0 1 0 10 10A10 10 0 0 0 12 2z"></path><circle cx="12" cy="12" r="3"></circle><path d="M12 2v3M12 19v3M2 12h3M19 12h3"></path></svg>
+                    </div>
+                    <div class="gps-copy">
+                        <h1 id="gpsStatus">Location sharing is off</h1>
+                        <p id="gpsSub">Location sharing is off. Start to enable phone GPS.</p>
+                    </div>
+                </div>
+                <span class="sim-badge" id="simBadge" style="display:none;"><span class="dot"></span>Demo simulation: ON</span>
+            </section>
+
+            <div class="actions-row">
+                <button class="start-btn" id="startBtn" type="button">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4"><path d="M12 2v6M12 22v-6M4 12H2M6.4 6.4 5 5M17.6 6.4 19 5M22 12h-2M17 17l2 2"></path><circle cx="12" cy="12" r="3"></circle></svg>
+                    <span id="startBtnLabel">Start Sharing Location</span>
+                </button>
+                <button class="trigger-btn" id="triggerBtn" type="button" disabled>
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M13 2 3 14h7l-1 8 10-12h-7l1-8z"></path></svg>
+                    <span>Simulate Cap Trigger</span>
+                </button>
+            </div>
+
+            <div class="trigger-feedback" id="triggerFeedback" aria-live="polite"></div>
+
+            <section class="card coord-card">
+                <div class="coord-row">
+                    <span class="coord-label">GPS status</span>
+                    <span class="coord-value muted" id="gpsState">Waiting</span>
+                </div>
+                <div class="coord-row">
+                    <span class="coord-label">Latitude</span>
+                    <span class="coord-value mono" id="latValue">—</span>
+                </div>
+                <div class="coord-row">
+                    <span class="coord-label">Longitude</span>
+                    <span class="coord-value mono" id="lngValue">—</span>
+                </div>
+                <div class="coord-row">
+                    <span class="coord-label">Last update</span>
+                    <span class="coord-value mono" id="updatedValue">—</span>
+                </div>
+                <div class="coord-row">
+                    <span class="coord-label">Backend</span>
+                    <span class="coord-value" id="backendValue">Not connected</span>
+                </div>
+            </section>
+
+            <p class="note">
+                Your phone GPS is monitored locally. Location is sent to the backend
+                only when the cap trigger is activated.
+            </p>
+
+            <section class="card demo-card" id="demoCard">
+                <button class="demo-head" id="demoToggle" type="button" aria-expanded="false">
+                    <span class="demo-title">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M10 2 3 14h7l-1 8 11-12h-7l1-8z"></path></svg>
+                        Developer · Demo
+                    </span>
+                    <span class="demo-toggle-label" id="demoToggleLabel">
+                        <span class="dot"></span>
+                        <span id="demoToggleText">Show Demo Controls</span>
+                    </span>
+                    <span class="demo-chev">
+                        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><polyline points="6 9 12 15 18 9"></polyline></svg>
+                    </span>
+                </button>
+                <div class="demo-body">
+                    <div class="demo-body-inner">
+                        <div class="demo-block">
+                            <h4>
+                                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 10c0 7-9 13-9 13s-9-6-9-13a9 9 0 0 1 18 0z"></path><circle cx="12" cy="10" r="3"></circle></svg>
+                                Demo GPS Simulator
+                            </h4>
+                            <div class="sim-switch-row">
+                                <div class="sim-switch-text">
+                                    <span class="sim-switch-title" id="simToggleStatus">Demo simulation: OFF</span>
+                                    <span class="sim-switch-desc" id="simToggleDesc">Simulate the phone moving</span>
+                                </div>
+                                <label class="switch">
+                                    <input type="checkbox" id="simToggle" aria-label="Demo simulation">
+                                    <span class="switch-track" aria-hidden="true"><span class="switch-thumb"></span></span>
+                                </label>
+                            </div>
+                        </div>
+                        <div class="demo-block" id="simPanelBlock">
+                            <h4>
+                                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 10c0 7-9 13-9 13s-9-6-9-13a9 9 0 0 1 18 0z"></path><circle cx="12" cy="10" r="3"></circle></svg>
+                                Demo Location
+                            </h4>
+                            <div class="sim-coords">
+                                <span>Latitude: <span class="mono" id="simLat">22.340700</span></span>
+                                <span>Longitude: <span class="mono" id="simLng">73.180800</span></span>
+                            </div>
+                            <div class="sim-panel">
+                                <button class="move-btn" id="moveNorth" type="button" disabled>
+                                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="m18 15-6-6-6 6"></path></svg>
+                                    North
+                                </button>
+                                <button class="move-btn" id="moveSouth" type="button" disabled>
+                                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="m6 9 6 6 6-6"></path></svg>
+                                    South
+                                </button>
+                                <button class="move-btn" id="moveEast" type="button" disabled>
+                                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="m9 6 6 6-6 6"></path></svg>
+                                    East
+                                </button>
+                                <button class="move-btn" id="moveWest" type="button" disabled>
+                                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="m15 6-6 6 6 6"></path></svg>
+                                    West
+                                </button>
+                            </div>
+                            <p class="demo-note">Movement updates the local simulated position only. The cap trigger transmits it to the backend.</p>
+                        </div>
+                    </div>
+                </div>
+            </section>
+        </main>
+    </div>
+
+    <script src="script.js"></script>
+</body>
+</html>

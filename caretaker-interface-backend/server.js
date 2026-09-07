@@ -13,8 +13,9 @@ app.use(express.json());
 
 const events = new Map();
 let latestLocation = null;
+const sseClients = new Set();
 
-const VALID_TRIGGERS = ['SOS', 'HEART_RATE', 'SOS_AND_HEART_RATE', 'NORMAL'];
+const VALID_TRIGGERS = ['SOS', 'HEART_RATE', 'SOS_AND_HEART_RATE', 'NORMAL', 'OBSTACLE_LEFT', 'OBSTACLE_CENTER', 'OBSTACLE_RIGHT'];
 const VALID_STATUSES = ['NORMAL', 'ACTIVE', 'ACKNOWLEDGED', 'RESOLVED'];
 
 const ALLOWED_TRANSITIONS = {
@@ -38,6 +39,13 @@ function isValidLongitude(value) {
 
 function isValidTimestamp(value) {
     return typeof value === 'string' && value.trim() !== '' && !Number.isNaN(Date.parse(value));
+}
+
+function broadcastEvent(event) {
+    const data = `event: event\ndata: ${JSON.stringify(event)}\n\n`;
+    for (const client of sseClients) {
+        client.write(data);
+    }
 }
 
 function validateLocation(location) {
@@ -151,6 +159,7 @@ app.post('/api/events', (req, res) => {
     }
 
     events.set(event.alertId, event);
+    broadcastEvent(event);
     return res.status(201).json(event);
 });
 
@@ -179,6 +188,22 @@ app.patch('/api/events/:alertId', (req, res) => {
 
     event.status = newStatus;
     return res.status(200).json(event);
+});
+
+app.get('/api/events/stream', (req, res) => {
+    res.set({
+        'Content-Type': 'text/event-stream',
+        'Cache-Control': 'no-cache',
+        'Connection': 'keep-alive',
+        'X-Accel-Buffering': 'no'
+    });
+    res.flushHeaders();
+    res.write('retry: 3000\n\n');
+
+    sseClients.add(res);
+    req.on('close', () => {
+        sseClients.delete(res);
+    });
 });
 
 app.use((req, res) => {

@@ -378,10 +378,13 @@
                                         <span class="status-pill" id="apiStatus"><span class="status-dot"></span><span>Disconnected</span></span>
                                     </div>
                                     <div class="sim-state-line" style="margin-top:0.5rem;">
-                                        <button class="btn btn-outline" id="locationPollingBtn">Connect Location</button>
-                                        <span class="status-pill" id="locationApiStatus"><span class="status-dot"></span><span>Disconnected</span></span>
+                                        <button class="btn btn-outline" id="locationPollingBtn">Phone GPS</button>
+                                        <span class="status-pill" id="locationApiStatus"><span class="status-dot"></span><span>Waiting for phone</span></span>
                                     </div>
-                                    <p style="font-size:0.6875rem;color:var(--text-3);">Events are validated and de-duplicated before entering history.</p>
+                                    <div class="sim-state-line" style="margin-top:0.25rem;">
+                                        <span style="font-size:0.6875rem;color:var(--text-3);">Last update: <b id="phoneLastUpdate">—</b></span>
+                                    </div>
+                                    <p style="font-size:0.6875rem;color:var(--text-3);">The blind person's phone is the GPS source. This dashboard only reads it — it never sends its own location.</p>
                                 </div>
                             </div>
 
