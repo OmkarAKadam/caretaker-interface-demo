@@ -208,6 +208,327 @@ body {
 .voice-state-badge.on { color: var(--ok); background: var(--ok-soft); border-color: #bfe3cd; }
 .voice-state-badge.on .dot { background: var(--ok); }
 
+/* ── Hands-free Listening Card ───────────────────────────── */
+
+.handsfree-card {
+    display: flex;
+    flex-direction: column;
+    gap: 0.6rem;
+    padding: 1rem 1.25rem 1.1rem;
+}
+
+.handsfree-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.85rem;
+}
+
+.handsfree-copy h2 {
+    font-size: 0.9375rem;
+    font-weight: 800;
+    letter-spacing: -0.01em;
+    color: var(--text-1);
+    line-height: 1.25;
+    margin-bottom: 0.15rem;
+}
+
+.handsfree-copy p {
+    font-size: 0.8125rem;
+    font-weight: 600;
+    color: var(--text-2);
+    line-height: 1.4;
+}
+
+.handsfree-copy p.listening {
+    color: var(--ok);
+}
+
+.handsfree-hint {
+    font-size: 0.6875rem;
+    color: var(--text-3);
+    font-weight: 500;
+    line-height: 1.5;
+    padding-top: 0.55rem;
+    border-top: 1px dashed var(--line);
+}
+
+.handsfree-card.active {
+    border-color: var(--ok);
+    background: var(--ok-soft);
+}
+
+.handsfree-meta {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    padding-top: 0.55rem;
+    border-top: 1px dashed var(--line);
+}
+
+.buzzer-state {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.4rem;
+    font-size: 0.6875rem;
+    font-weight: 600;
+    color: var(--text-2);
+}
+
+.buzzer-dot {
+    width: 0.5rem;
+    height: 0.5rem;
+    border-radius: 50%;
+    background: var(--text-3);
+}
+
+.buzzer-state.on .buzzer-dot {
+    background: var(--ok);
+}
+
+.buzzer-state.off .buzzer-dot {
+    background: var(--emergency);
+}
+
+/* ── Mic Button (Emergency SOS) ────────────────────────────── */
+
+.gps-actions-extended {
+    display: grid;
+    grid-template-columns: 1fr;
+    gap: var(--gap-xs);
+}
+
+.mic-sos-btn {
+    display: flex; align-items: center; justify-content: center; gap: 0.6rem;
+    width: 100%;
+    padding: 0.7rem 1.1rem;
+    min-height: 44px;
+    border: 1.5px solid var(--emergency);
+    border-radius: var(--r-sm);
+    background: var(--emergency-soft);
+    color: var(--emergency-strong);
+    font-size: 0.8125rem; font-weight: 600;
+    font-family: inherit;
+    cursor: pointer;
+    transition: var(--t-fast);
+    user-select: none;
+}
+
+.mic-sos-btn svg { width: 16px; height: 16px; }
+
+.mic-sos-btn:hover:not(:disabled) {
+    background: var(--emergency);
+    color: #fff;
+    transform: translateY(-1px);
+    border-color: var(--emergency-strong);
+}
+.mic-sos-btn:focus-visible { outline: 2px solid var(--emergency); outline-offset: 2px; }
+.mic-sos-btn:active:not(:disabled) { transform: scale(0.99); }
+.mic-sos-btn:disabled { opacity: 0.45; cursor: not-allowed; }
+
+.mic-sos-btn.listening {
+    background: var(--emergency);
+    color: #fff;
+    border-color: var(--emergency-strong);
+    animation: mic-pulse 1.2s ease-in-out infinite;
+}
+
+@keyframes mic-pulse {
+    0%, 100% { box-shadow: 0 0 0 0 rgba(217, 92, 72, 0.3); }
+    50% { box-shadow: 0 0 0 8px rgba(217, 92, 72, 0); }
+}
+
+/* ── Emergency Section ─────────────────────────────────────── */
+
+.emergency-section {
+    display: none;
+}
+
+.emergency-section.active {
+    display: block;
+}
+
+.emergency-card {
+    background: var(--emergency-soft);
+    border: 2px solid var(--emergency);
+    border-radius: var(--r-lg);
+    overflow: hidden;
+}
+
+.emergency-header {
+    display: flex; align-items: center; gap: 0.85rem;
+    padding: 1.1rem 1.25rem 1rem;
+    background: var(--emergency);
+    color: #fff;
+}
+
+.emergency-header-icon {
+    width: 44px; height: 44px;
+    border-radius: var(--r-md);
+    background: rgba(255, 255, 255, 0.15);
+    display: flex; align-items: center; justify-content: center;
+    flex-shrink: 0;
+}
+
+.emergency-header-icon svg { width: 22px; height: 22px; }
+
+.emergency-header-text h2 {
+    font-size: 1rem; font-weight: 800;
+    margin-bottom: 0.05rem;
+}
+
+.emergency-header-text p {
+    font-size: 0.75rem; font-weight: 600;
+    opacity: 0.85;
+}
+
+.emergency-actions {
+    padding: 1rem 1.25rem;
+}
+
+.emergency-feedback {
+    font-size: 0.8125rem;
+    font-weight: 600;
+    color: var(--text-2);
+    line-height: 1.5;
+    margin-bottom: 0.75rem;
+    padding: 0.7rem 0.9rem;
+    background: var(--bg-surface);
+    border: 1px solid var(--line);
+    border-radius: var(--r-sm);
+}
+
+.emergency-feedback.listening-state {
+    color: var(--emergency-strong);
+    border-color: #f0cfc6;
+    background: #fff;
+}
+
+.emergency-cancel-btn {
+    width: 100%;
+    padding: 0.65rem 1rem;
+    border: 1.5px solid var(--line-strong);
+    border-radius: var(--r-sm);
+    background: var(--bg-surface);
+    color: var(--text-2);
+    font-size: 0.8125rem; font-weight: 600;
+    font-family: inherit;
+    cursor: pointer;
+    transition: var(--t-fast);
+}
+
+.emergency-cancel-btn:hover { border-color: var(--emergency); color: var(--emergency); background: var(--emergency-soft); }
+.emergency-cancel-btn:focus-visible { outline: 2px solid var(--emergency); outline-offset: 2px; }
+
+/* ── Confirmation Card ─────────────────────────────────────── */
+
+.confirmation-card {
+    display: none;
+    background: var(--bg-surface);
+    border: 2px solid var(--brand);
+    border-radius: var(--r-lg);
+    overflow: hidden;
+}
+
+.confirmation-card.active {
+    display: block;
+}
+
+.confirmation-header {
+    display: flex; align-items: center; gap: 0.85rem;
+    padding: 1rem 1.25rem 0.9rem;
+    background: var(--brand);
+    color: #fff;
+}
+
+.confirmation-header-icon {
+    width: 44px; height: 44px;
+    border-radius: var(--r-md);
+    background: rgba(255, 255, 255, 0.15);
+    display: flex; align-items: center; justify-content: center;
+    flex-shrink: 0;
+}
+
+.confirmation-header-icon svg { width: 22px; height: 22px; }
+
+.confirmation-header-text h2 {
+    font-size: 1rem; font-weight: 800;
+    margin-bottom: 0.05rem;
+}
+
+.confirmation-header-text p {
+    font-size: 0.75rem; font-weight: 600;
+    opacity: 0.85;
+}
+
+.confirmation-body {
+    padding: 1.1rem 1.25rem;
+}
+
+.confirmation-message {
+    font-size: 0.9375rem;
+    font-weight: 600;
+    color: var(--text-1);
+    line-height: 1.5;
+    padding: 0.8rem 0.9rem;
+    background: var(--bg-surface-alt);
+    border: 1px solid var(--line);
+    border-radius: var(--r-sm);
+    margin-bottom: 1rem;
+}
+
+.confirmation-actions {
+    display: flex; gap: 0.5rem;
+}
+
+.confirm-btn {
+    display: inline-flex; align-items: center; justify-content: center; gap: 0.4rem;
+    flex: 1;
+    padding: 0.7rem 1rem;
+    min-height: 44px;
+    border: none;
+    border-radius: var(--r-sm);
+    background: var(--emergency);
+    color: #fff;
+    font-size: 0.875rem; font-weight: 700;
+    font-family: inherit;
+    cursor: pointer;
+    transition: var(--t-fast);
+}
+
+.confirm-btn:hover:not(:disabled) { background: var(--emergency-strong); transform: translateY(-1px); }
+.confirm-btn:disabled { opacity: 0.45; cursor: not-allowed; }
+
+.confirm-cancel-btn {
+    display: inline-flex; align-items: center; justify-content: center; gap: 0.4rem;
+    flex: 1;
+    padding: 0.7rem 1rem;
+    min-height: 44px;
+    border: 1.5px solid var(--line-strong);
+    border-radius: var(--r-sm);
+    background: var(--bg-surface);
+    color: var(--text-2);
+    font-size: 0.875rem; font-weight: 600;
+    font-family: inherit;
+    cursor: pointer;
+    transition: var(--t-fast);
+}
+
+.confirm-cancel-btn:hover { border-color: var(--emergency); color: var(--emergency); background: var(--emergency-soft); }
+.confirm-cancel-btn:focus-visible { outline: 2px solid var(--emergency); outline-offset: 2px; }
+
+.confirm-feedback {
+    min-height: 0;
+    font-size: 0.6875rem;
+    font-weight: 600;
+    color: var(--text-3);
+    text-align: center;
+    line-height: 1;
+    padding: 0.75rem 0 0;
+}
+.confirm-feedback.ok { color: var(--ok); }
+.confirm-feedback.bad { color: var(--emergency-strong); }
+
 /* ── Action Buttons ────────────────────────────────────────── */
 
 .actions-row {
@@ -658,18 +979,21 @@ body {
         grid-template-columns: minmax(0, 1fr) 1fr 360px;
         grid-template-areas:
             "voice    gps      demo"
-            "voiceact gpsact   demo"
+            "voiceact gpsactions demo"
             "voicefb  gpsfb    demo"
-            "last     gpscoor  demo"
-            "last     note     demo";
+            "handsfree gpscoor  demo"
+            "last     note     demo"
+            "last     .        demo";
         align-items: start;
         gap: var(--gap-xs) var(--gap-lg);
         padding: var(--gap-lg) 2rem 2.25rem;
     }
     .voice-card { grid-area: voice; padding: 1.25rem 1.35rem; }
     #voiceActionsRow { grid-area: voiceact; grid-template-columns: 1fr 1fr; }
+    .handsfree-card { grid-area: handsfree; }
     .gps-card { grid-area: gps; padding: 1.25rem 1.35rem; }
-    #gpsActionsRow { grid-area: gpsact; grid-template-columns: 1fr 1fr; }
+    #gpsActionsExtended { grid-area: gpsactions; }
+    #gpsActionsRow { grid-template-columns: 1fr 1fr; }
     #triggerFeedback { grid-area: gpsfb; padding: 0; }
     .last-alert-card { grid-area: last; padding: 1rem 1.35rem 1.15rem; }
     .coord-card { grid-area: gpscoor; padding: 0.15rem 1.35rem; }

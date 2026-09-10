@@ -174,7 +174,10 @@ function getTriggerLabel(trigger) {
     const labels = {
         'SOS': 'Manual SOS',
         'HEART_RATE': 'Abnormal Heart Rate',
-        'SOS_AND_HEART_RATE': 'SOS + Abnormal Heart Rate'
+        'SOS_AND_HEART_RATE': 'SOS + Abnormal Heart Rate',
+        'OBSTACLE_LEFT': 'Obstacle Left',
+        'OBSTACLE_CENTER': 'Obstacle Ahead',
+        'OBSTACLE_RIGHT': 'Obstacle Right'
     };
     return labels[trigger] || trigger;
 }
@@ -184,7 +187,10 @@ function getHeartRateDisplay(heartRate) {
 }
 
 function getLocationDisplay(latitude, longitude) {
-    return `${latitude.toFixed(4)}, ${longitude.toFixed(4)}`;
+    if (typeof latitude === 'number' && typeof longitude === 'number') {
+        return `${latitude.toFixed(4)}, ${longitude.toFixed(4)}`;
+    }
+    return '—';
 }
 
 function getSeverityKey(trigger) {
@@ -470,6 +476,19 @@ function updateAlertDetails(event) {
     tierEl.className = `selected-tier ${sevClass}`;
     tierEl.textContent = event.trigger === 'HEART_RATE' ? 'Possible Emergency' : (triggerClass === 'sos' ? 'Emergency' : 'Normal');
 
+    const messageRow = document.getElementById('messageRow');
+    const messageEl = document.getElementById('selectedMessage');
+    if (messageEl && messageRow) {
+        const message = event.message;
+        if (typeof message === 'string' && message.trim() !== '') {
+            messageRow.style.display = '';
+            messageEl.textContent = message;
+        } else {
+            messageRow.style.display = 'none';
+            messageEl.textContent = '';
+        }
+    }
+
     const hrEl = document.getElementById('selectedHeartRate');
     if (event.heartRate !== null && event.heartRate !== undefined) {
         hrEl.textContent = `${event.heartRate} BPM`;
@@ -481,8 +500,8 @@ function updateAlertDetails(event) {
 
     document.getElementById('selectedLogged').textContent = formatDateTime(event.timestamp);
     document.getElementById('selectedSource').textContent = getSourceLabel(event.source || 'API');
-    document.getElementById('selectedLat').textContent = event.latitude.toFixed(4);
-    document.getElementById('selectedLng').textContent = event.longitude.toFixed(4);
+    document.getElementById('selectedLat').textContent = typeof event.latitude === 'number' ? event.latitude.toFixed(4) : '—';
+    document.getElementById('selectedLng').textContent = typeof event.longitude === 'number' ? event.longitude.toFixed(4) : '—';
 }
 
 function updateHeartRateDisplay(event) {
@@ -553,8 +572,8 @@ function handleEvent(event) {
 
     const latitudeEl = document.getElementById('latitude');
     const longitudeEl = document.getElementById('longitude');
-    if (latitudeEl) latitudeEl.textContent = event.latitude.toFixed(4);
-    if (longitudeEl) longitudeEl.textContent = event.longitude.toFixed(4);
+    if (latitudeEl) latitudeEl.textContent = typeof event.latitude === 'number' ? event.latitude.toFixed(4) : '—';
+    if (longitudeEl) longitudeEl.textContent = typeof event.longitude === 'number' ? event.longitude.toFixed(4) : '—';
 
     const srcEl = document.getElementById('locationSource');
     if (srcEl) srcEl.textContent = getSourceLabel(event.source || 'API');
@@ -744,13 +763,20 @@ function validateEvent(event) {
         return true;
     }
 
-    const validTriggers = ['SOS', 'HEART_RATE', 'SOS_AND_HEART_RATE'];
+    const validTriggers = ['SOS', 'HEART_RATE', 'SOS_AND_HEART_RATE', 'OBSTACLE_LEFT', 'OBSTACLE_CENTER', 'OBSTACLE_RIGHT'];
     if (!validTriggers.includes(event.trigger)) {
         console.warn(`[Events] Ignored invalid event: unknown trigger "${event.trigger}".`);
         return false;
     }
 
-    const required = ['alertId', 'status', 'latitude', 'longitude', 'timestamp'];
+    // Obstacle events (MQTT radar) carry no GPS, so latitude/longitude are
+    // optional for them. All other triggers still require coordinates.
+    const isObstacle = event.trigger === 'OBSTACLE_LEFT' || event.trigger === 'OBSTACLE_CENTER' || event.trigger === 'OBSTACLE_RIGHT';
+
+    const required = ['alertId', 'status', 'timestamp'];
+    if (!isObstacle) {
+        required.push('latitude', 'longitude');
+    }
     for (const field of required) {
         const value = event[field];
         if (value === undefined || value === null || value === '') {
@@ -759,7 +785,7 @@ function validateEvent(event) {
         }
     }
 
-    if (typeof event.latitude !== 'number' || typeof event.longitude !== 'number') {
+    if (!isObstacle && (typeof event.latitude !== 'number' || typeof event.longitude !== 'number')) {
         console.warn('[Events] Ignored invalid event: latitude/longitude must be numbers.');
         return false;
     }
@@ -785,6 +811,15 @@ function validateEvent(event) {
 
 function receiveEvent(event) {
     if (!validateEvent(event)) {
+        return;
+    }
+
+    // Obstacle detections are frequent navigation events handled live by the
+    // blind-client TTS. Keep them out of the caretaker Alert History / Alert Board
+    // (and out of active-alert counts) while leaving MQTT/backend processing intact.
+    if (event.trigger === 'OBSTACLE_LEFT' ||
+        event.trigger === 'OBSTACLE_CENTER' ||
+        event.trigger === 'OBSTACLE_RIGHT') {
         return;
     }
 

@@ -56,6 +56,64 @@
                 </button>
             </div>
 
+            <section class="card handsfree-card" id="handsfreeCard">
+                <div class="handsfree-head">
+                    <div class="handsfree-copy">
+                        <h2>Hands-free listening</h2>
+                        <p id="handsfreeStatus">Say "Help" to control the device by voice</p>
+                    </div>
+                    <label class="switch">
+                        <input type="checkbox" id="handsfreeToggle" aria-label="Hands-free listening">
+                        <span class="switch-track" aria-hidden="true"><span class="switch-thumb"></span></span>
+                    </label>
+                </div>
+                <div class="handsfree-hint" id="handsfreeHint">When enabled, say "Help" to control the buzzer or request emergency assistance. Emergency SOS is never sent without your confirmation.</div>
+                <div class="handsfree-meta">
+                    <div class="buzzer-state" id="buzzerState" hidden>
+                        <span class="buzzer-dot"></span>
+                        <span id="buzzerStateText">Buzzer: Unknown</span>
+                    </div>
+                </div>
+            </section>
+
+            <section class="emergency-section" id="emergencySection">
+                <div class="emergency-card">
+                    <div class="emergency-header">
+                        <div class="emergency-header-icon">
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"></path><line x1="12" y1="9" x2="12" y2="13"></line><line x1="12" y1="17" x2="12.01" y2="17"></line></svg>
+                        </div>
+                        <div class="emergency-header-text">
+                            <h2>Emergency SOS</h2>
+                            <p>Voice emergency assistance</p>
+                        </div>
+                    </div>
+                    <div class="emergency-actions">
+                        <div class="emergency-feedback" id="emergencyFeedback">Press the microphone and describe your emergency situation.</div>
+                        <button class="emergency-cancel-btn" id="emergencyCancelBtn" type="button">Cancel Emergency</button>
+                    </div>
+                </div>
+            </section>
+
+            <section class="confirmation-card" id="confirmationCard">
+                <div class="confirmation-header">
+                    <div class="confirmation-header-icon">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"></path><polyline points="22 4 12 14.01 9 11.01"></polyline></svg>
+                    </div>
+                    <div class="confirmation-header-text">
+                        <h2>Confirm Emergency</h2>
+                        <p>Review your message before sending</p>
+                    </div>
+                </div>
+                <div class="confirmation-body">
+                    <div class="confirmation-message" id="confirmationMessage"></div>
+                    <div class="confirmation-actions">
+                        <button class="confirm-btn" id="confirmSendBtn" type="button" disabled>Send Alert</button>
+                        <button class="confirm-cancel-btn" id="confirmCancelBtn" type="button">Cancel</button>
+                    </div>
+                    <div class="confirm-feedback" id="confirmFeedback">Say "yes" / "send it" to confirm, or "no" / "cancel" to cancel.</div>
+                </div>
+            </section>
+
             <section class="card last-alert-card">
                 <div class="last-alert-head">
                     <span class="last-alert-label">Last voice alert</span>
@@ -78,14 +136,20 @@
                 <span class="sim-badge" id="simBadge" style="display:none;"><span class="dot"></span>Demo simulation: ON</span>
             </section>
 
-            <div class="actions-row" id="gpsActionsRow">
-                <button class="start-btn" id="startBtn" type="button">
-                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4"><path d="M12 2v6M12 22v-6M4 12H2M6.4 6.4 5 5M17.6 6.4 19 5M22 12h-2M17 17l2 2"></path><circle cx="12" cy="12" r="3"></circle></svg>
-                    <span id="startBtnLabel">Start Sharing Location</span>
-                </button>
-                <button class="trigger-btn" id="triggerBtn" type="button" disabled>
-                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M13 2 3 14h7l-1 8 10-12h-7l1-8z"></path></svg>
-                    <span>Simulate Cap Trigger</span>
+            <div class="gps-actions-extended" id="gpsActionsExtended">
+                <div class="actions-row" id="gpsActionsRow">
+                    <button class="start-btn" id="startBtn" type="button">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4"><path d="M12 2v6M12 22v-6M4 12H2M6.4 6.4 5 5M17.6 6.4 19 5M22 12h-2M17 17l2 2"></path><circle cx="12" cy="12" r="3"></circle></svg>
+                        <span id="startBtnLabel">Start Sharing Location</span>
+                    </button>
+                    <button class="trigger-btn" id="triggerBtn" type="button" disabled>
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M13 2 3 14h7l-1 8 10-12h-7l1-8z"></path></svg>
+                        <span>Simulate Cap Trigger</span>
+                    </button>
+                </div>
+                <button class="mic-sos-btn" id="micSosBtn" type="button">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3z"></path><path d="M19 10v2a7 7 0 0 1-14 0v-2"></path><line x1="12" y1="19" x2="12" y2="22"></line></svg>
+                    <span id="micSosLabel">Emergency SOS — Voice</span>
                 </button>
             </div>
 

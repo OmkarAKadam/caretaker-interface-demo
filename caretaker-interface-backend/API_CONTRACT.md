@@ -114,6 +114,58 @@ No fake GPS coordinates are ever generated or returned.
 
 ---
 
+## Device command channel (voice-controlled buzzer)
+
+The backend publishes **commands to the ESP32** over MQTT on the device command topic, the
+opposite direction from the status/alarm topics the ESP32 already publishes to.
+
+| Topic                      | Direction    | Purpose                          |
+|----------------------------|--------------|----------------------------------|
+| `blindguardian/device/status` | ESP32 → backend | Device status (existing)      |
+| `blindguardian/device/command` | backend → ESP32 | **Commands to the ESP32 (new)** |
+
+### POST /api/buzzer — send a buzzer command
+
+The voice client posts a command here; the backend publishes it on
+`blindguardian/device/command` for the ESP32 to receive and apply.
+
+```http
+POST /api/buzzer
+```
+
+```json
+{ "command": "BUZZER_OFF" }
+```
+
+| Field     | Type   | Required | Notes                                       |
+|-----------|--------|----------|---------------------------------------------|
+| `command` | string | yes      | `BUZZER_ON` or `BUZZER_OFF`. Anything else → `400`. |
+
+Behavior:
+- The backend publishes `{ "command": "BUZZER_ON" | "BUZZER_OFF", "issuedAt": "<ISO>" }` to
+  `blindguardian/device/command`.
+- If MQTT is not configured or not connected, the endpoint returns `503` and **no fake state
+  is recorded** — the command is not silently "applied" in the UI.
+- On a successful publish, `200` returns `{ "command": ..., "state": "ON"|"OFF", "published": true }`.
+
+### GET /api/buzzer — read last known command state
+
+```http
+GET /api/buzzer
+```
+
+Returns `{ "state": "ON"|"OFF"|null, "commandTopic": "blindguardian/device/command", "mqtt": "<state>" }`.
+
+> **ESP32 firmware requirement (blocked until firmware is available):** the ESP32 must
+> subscribe to `blindguardian/device/command` and parse `command` values `BUZZER_ON` /
+> `BUZZER_OFF`, toggling its buzzer accordingly. The current `esp.ino` in this repo is a
+> standalone local-radar demo with **no WiFi/MQTT**, so the physical buzzer control path
+> cannot be exercised end-to-end until a network-capable firmware subscriber is added. The
+> backend and voice client are already wired to this exact topic so no rework is needed once
+> the firmware lands.
+
+---
+
 ## Event location enrichment
 
 Because the phone is the primary GPS source, `POST /api/events` no longer **requires**
@@ -256,7 +308,6 @@ The event flows through the same pipeline as any other trigger:
 
 Caretaker acknowledgement/resolution is **backend-controlled**. The ESP32 should **not**
 perform acknowledgement or resolution — it only creates events.
-
 ### Acknowledge
 
 ```http

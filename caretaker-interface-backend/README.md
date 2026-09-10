@@ -18,6 +18,12 @@ npm install
 npm start
 ```
 
+To load environment variables from a `.env` file (Node 20.6+):
+
+```text
+npm run start:env
+```
+
 ## Default URL
 
 ```text
@@ -60,6 +66,43 @@ never generates or infers a heart-rate value.
 
 This backend uses **in-memory storage** (`Map`). There is no database. **All events and
 the latest location are lost when the server restarts.**
+
+## MQTT (optional)
+
+The backend can connect to **HiveMQ Cloud** as an additional input channel via a
+server-side MQTT client (`mqtt/`). MQTT is **optional**: if it is not configured or the
+broker is unreachable, the REST API still runs normally. MQTT does not replace REST, SSE,
+or the existing event processing.
+
+Configure via environment variables (see `.env.example`):
+
+| Variable         | Purpose                                                              |
+|------------------|----------------------------------------------------------------------|
+| `MQTT_BROKER_URL`| Broker URL, e.g. `mqtts://<cluster>.s2.eu.hivemq.cloud:8883` (TLS). |
+| `MQTT_USERNAME`  | HiveMQ Cloud username.                                               |
+| `MQTT_PASSWORD`  | HiveMQ Cloud password.                                               |
+| `MQTT_CLIENT_ID` | Optional — auto-generated as `caretaker-backend-<random>` if empty.  |
+
+The client subscribes to the project MQTT topics defined in `mqtt/topics.js` and routes
+messages into the **existing backend processing flow** (no separate alert system):
+
+| Topic | Behavior |
+|-------|----------|
+| `blindguardian/sensor/radar` | `direction` `LEFT`/`CENTER`/`RIGHT` → `OBSTACLE_LEFT`/`OBSTACLE_CENTER`/`OBSTACLE_RIGHT` event |
+| `blindguardian/emergency/sos` | → `SOS` event |
+| `blindguardian/mobile/location` | Updates the same latest location used by `POST /api/location` |
+| `blindguardian/device/status` | Tracks latest device status in memory (exposed as `deviceStatus` on `/api/health`) |
+| `blindguardian/mobile/fall` | Stored in memory + logged only (no `FALL` trigger in the event model yet) |
+| `blindguardian/alerts` | Routed through the existing event flow only if the payload carries a valid existing `trigger`; otherwise logged |
+| `blindguardian/sensor/distance` | Subscribed, handled safely, logged only |
+
+MQTT-created events reuse the same `events` store and SSE broadcast as `POST /api/events`,
+so existing SSE clients receive them on the same `/api/events/stream`. Malformed or invalid
+MQTT payloads are logged and ignored without crashing or affecting REST.
+
+`GET /api/health` reports an informational `mqtt` field
+(`disabled`/`connecting`/`connected`/`reconnecting`/`disconnected`/`error`) and an optional
+`deviceStatus` object, without affecting the `status: ok` health result.
 
 ## Hardware note
 

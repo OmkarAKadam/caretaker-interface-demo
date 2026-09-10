@@ -40,6 +40,37 @@ let connection = null;
 let reconnectTimer = null;
 let reconnectAttempts = 0;
 
+/* ── Voice SOS state ─────────────────────────────────────── */
+let sosState = 'IDLE';
+let sosRecognition = null;
+let sosCapturedMessage = '';
+let sosSent = false;
+let sosConfirmationTimer = null;
+let handsFreeEnabled = false;
+let passiveRestartCount = 0;
+let passiveRestartTimer = null;
+let buzzerState = null;
+
+const CONFIRMATION_YES = new Set(['yes', 'send it', 'confirm', 'send emergency alert', 'send', 'ok', 'okay']);
+const CONFIRMATION_NO = new Set(['no', 'cancel', 'stop', 'no cancel', 'never mind', 'nevermind']);
+const WAKE_PHRASES = ['help', 'help me'];
+const SOS_MAX_MESSAGE_LENGTH = 500;
+const BUZZER_ENDPOINT = `${API_BASE_URL}/api/buzzer`;
+
+const EMERGENCY_COMMAND_PHRASES = [
+    'emergency',
+    'i need emergency assistance',
+    'i have fallen',
+    'i fell',
+    'need help',
+    'call for help'
+];
+
+const BUZZER_ON_PHRASES = ['buzzer on', 'turn the buzzer on', 'enable buzzer', 'turn buzzer on', 'buzzer on now', 'turn on the buzzer'];
+const BUZZER_OFF_PHRASES = ['buzzer off', 'turn the buzzer off', 'disable buzzer', 'turn buzzer off', 'buzzer off now', 'turn off the buzzer'];
+
+const COMMAND_UNKNOWN_RESPONSE = 'I didn\'t understand. You can say emergency, buzzer on, or buzzer off.';
+
 const voiceCard = document.getElementById('voiceCard');
 const voiceIcon = document.getElementById('voiceIcon');
 const voiceStatus = document.getElementById('voiceStatus');
@@ -85,6 +116,23 @@ const demoFeedback = document.getElementById('demoFeedback');
 const demoCapTrigger = document.getElementById('demoCapTrigger');
 const obstacleButtons = document.querySelectorAll('.obstacle-btn');
 
+const micSosBtn = document.getElementById('micSosBtn');
+const micSosLabel = document.getElementById('micSosLabel');
+const emergencySection = document.getElementById('emergencySection');
+const emergencyFeedback = document.getElementById('emergencyFeedback');
+const emergencyCancelBtn = document.getElementById('emergencyCancelBtn');
+const confirmationCard = document.getElementById('confirmationCard');
+const confirmationMessage = document.getElementById('confirmationMessage');
+const confirmSendBtn = document.getElementById('confirmSendBtn');
+const confirmCancelBtn = document.getElementById('confirmCancelBtn');
+const confirmFeedback = document.getElementById('confirmFeedback');
+const handsfreeCard = document.getElementById('handsfreeCard');
+const handsfreeToggle = document.getElementById('handsfreeToggle');
+const handsfreeStatus = document.getElementById('handsfreeStatus');
+const handsfreeHint = document.getElementById('handsfreeHint');
+const buzzerStateEl = document.getElementById('buzzerState');
+const buzzerStateText = document.getElementById('buzzerStateText');
+
 const moveButtons = {
     north: document.getElementById('moveNorth'),
     south: document.getElementById('moveSouth'),
@@ -97,6 +145,11 @@ const PHONE_COORDS = { latitude: 22.3407, longitude: 73.1808 };
 function formatTime(date) {
     if (!date) return '—';
     return date.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit', second: '2-digit', hour12: true });
+}
+
+function escapeHtml(text) {
+    const map = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#039;' };
+    return String(text).replace(/[&<>"']/g, (c) => map[c]);
 }
 
 /* ── Connection status ─────────────────────────────────────── */
@@ -155,8 +208,9 @@ function setVoiceState(state) {
     }
 }
 
-function speak(text) {
+function speak(text, onDone) {
     if (!voiceEnabled || !('speechSynthesis' in window)) {
+        if (onDone) onDone();
         return;
     }
     window.speechSynthesis.cancel();
@@ -164,6 +218,10 @@ function speak(text) {
     utterance.rate = 1.05;
     utterance.pitch = 1;
     utterance.volume = 1;
+    if (onDone) {
+        utterance.onend = () => onDone();
+        utterance.onerror = () => onDone();
+    }
     window.speechSynthesis.speak(utterance);
 }
 
@@ -209,9 +267,22 @@ function handleEventData(data) {
     if (markSeen(event.alertId)) {
         return;
     }
+    if (isInEmergencyConversation()) {
+        return;
+    }
     const label = DIRECTION_LABELS[event.trigger] || event.trigger;
     updateLastAlert(phrase, label);
     speak(phrase);
+}
+
+function isInEmergencyConversation() {
+    return sosState === 'COMMAND_LISTENING' ||
+        sosState === 'LISTENING_FOR_EMERGENCY' ||
+        sosState === 'CONFIRMING_MESSAGE' ||
+        sosState === 'SENDING_SOS' ||
+        sosState === 'SUCCESS' ||
+        sosState === 'ERROR' ||
+        sosState === 'CANCELLED';
 }
 
 function clearReconnectTimer() {
@@ -303,6 +374,693 @@ function disableVoiceAlerts() {
     disableBtn.disabled = true;
     setConnState('disconnected');
     setVoiceState('disabled');
+}
+
+/* ── Voice SOS — Mic button toggle ───────────────────────── */
+
+function speechRecognitionAvailable() {
+    return ('webkitSpeechRecognition' in window) || ('SpeechRecognition' in window);
+}
+
+function toggleMicSos() {
+    if (sosState !== 'IDLE' && sosState !== 'PASSIVE_LISTENING') {
+        stopVoiceCapture();
+        return;
+    }
+    if (!speechRecognitionAvailable()) {
+        setEmergencyFeedback('Speech recognition is not supported in this browser. Try Chrome or Edge on mobile.', false);
+        emergencySection.classList.add('active');
+        return;
+    }
+    stopPassiveListening();
+    startVoiceCapture();
+}
+
+function setEmergencyFeedback(text, isListening) {
+    emergencyFeedback.textContent = text;
+    emergencyFeedback.classList.remove('listening-state');
+    if (isListening) {
+        emergencyFeedback.classList.add('listening-state');
+    }
+}
+
+function setMicListening(isListening) {
+    micSosBtn.classList.toggle('listening', isListening);
+    micSosLabel.textContent = isListening ? 'Listening… Press to stop' : 'Emergency SOS — Voice';
+}
+
+/* ── Hands-free passive listening ────────────────────────── */
+
+function updateHandsfreeUI() {
+    if (!handsfreeCard || !handsfreeStatus || !handsfreeHint) return;
+    if (!handsFreeEnabled) {
+        handsfreeCard.classList.remove('active');
+        handsfreeStatus.textContent = 'Hands-free listening off';
+        handsfreeStatus.classList.remove('listening');
+        handsfreeHint.textContent = 'Enable to listen for "Help" to control the device by voice. Emergency SOS is only sent after you confirm.';
+        return;
+    }
+    if (sosState === 'PASSIVE_LISTENING') {
+        handsfreeCard.classList.add('active');
+        handsfreeStatus.textContent = 'Hands-free listening';
+        handsfreeStatus.classList.add('listening');
+        handsfreeHint.textContent = 'Say "Help" to control the buzzer or request emergency assistance.';
+    } else if (sosState === 'COMMAND_LISTENING') {
+        handsfreeCard.classList.add('active');
+        handsfreeStatus.textContent = 'Listening for command';
+        handsfreeStatus.classList.add('listening');
+        handsfreeHint.textContent = 'Emergency \u2022 Buzzer on \u2022 Buzzer off';
+    } else if (sosState === 'EXECUTING_COMMAND') {
+        handsfreeCard.classList.add('active');
+        handsfreeStatus.textContent = 'Sending command to device';
+        handsfreeStatus.classList.remove('listening');
+        handsfreeHint.textContent = 'Waiting for the device to confirm.';
+    } else {
+        handsfreeCard.classList.add('active');
+        handsfreeStatus.textContent = 'Hands-free active';
+        handsfreeStatus.classList.remove('listening');
+        handsfreeHint.textContent = 'Listening is paused during the conversation.';
+    }
+}
+
+function stopPassiveListening() {
+    clearTimeout(passiveRestartTimer);
+    passiveRestartTimer = null;
+    passiveRestartCount = 0;
+    if (sosState === 'PASSIVE_LISTENING' || sosState === 'COMMAND_LISTENING' || sosState === 'EXECUTING_COMMAND') {
+        stopRecognition();
+        sosState = 'IDLE';
+    }
+    updateHandsfreeUI();
+}
+
+function startPassiveListening() {
+    if (!handsFreeEnabled) return;
+    if (!speechRecognitionAvailable()) {
+        setHandsfreeDenied('Speech recognition is not supported in this browser.');
+        return;
+    }
+    if (!sosRecognition) {
+        sosState = 'PASSIVE_LISTENING';
+        startRecognition('passive');
+    } else {
+        sosState = 'PASSIVE_LISTENING';
+    }
+    updateHandsfreeUI();
+}
+
+function setHandsfreeDenied(text) {
+    handsFreeEnabled = false;
+    if (handsfreeToggle) handsfreeToggle.checked = false;
+    if (handsfreeStatus) {
+        handsfreeStatus.textContent = 'Microphone access required';
+        handsfreeStatus.classList.remove('listening');
+    }
+    if (handsfreeHint) handsfreeHint.textContent = text + ' Microphone access is required for hands-free emergency activation. The manual Emergency SOS button still works.';
+    if (handsfreeCard) handsfreeCard.classList.remove('active');
+}
+
+function enableHandsFree() {
+    if (!speechRecognitionAvailable()) {
+        setHandsfreeDenied('Speech recognition is not supported in this browser.');
+        return;
+    }
+    handsFreeEnabled = true;
+    if (sosState === 'IDLE') {
+        startPassiveListening();
+    } else {
+        updateHandsfreeUI();
+    }
+}
+
+function disableHandsFree() {
+    handsFreeEnabled = false;
+    stopPassiveListening();
+    if (sosState === 'IDLE') {
+        updateHandsfreeUI();
+    }
+}
+
+function toggleHandsFree() {
+    if (handsfreeToggle.checked) {
+        enableHandsFree();
+    } else {
+        disableHandsFree();
+    }
+}
+
+/* ── Voice SOS — State machine ───────────────────────────── */
+
+function startVoiceCapture() {
+    sosState = 'LISTENING_FOR_EMERGENCY';
+    sosCapturedMessage = '';
+    sosSent = false;
+    if (sosConfirmationTimer) {
+        clearTimeout(sosConfirmationTimer);
+        sosConfirmationTimer = null;
+    }
+    emergencySection.classList.add('active');
+    confirmationCard.classList.remove('active');
+    setEmergencyFeedback('I\'m listening. Please tell me what happened.', true);
+    setMicListening(true);
+    updateHandsfreeUI();
+
+    const prompt = 'I\'m listening. Please tell me what happened.';
+    speak(prompt, () => {
+        if (sosState === 'LISTENING_FOR_EMERGENCY') {
+            startRecognition('capture');
+        }
+    });
+}
+
+/* ── Voice command listening (wake → command) ──────────── */
+
+function startCommandListening() {
+    sosState = 'COMMAND_LISTENING';
+    sosCapturedMessage = '';
+    sosSent = false;
+    if (sosConfirmationTimer) {
+        clearTimeout(sosConfirmationTimer);
+        sosConfirmationTimer = null;
+    }
+    emergencySection.classList.remove('active');
+    confirmationCard.classList.remove('active');
+    updateHandsfreeUI();
+
+    const prompt = 'What would you like to do? Say emergency, buzzer on, or buzzer off.';
+    speak(prompt, () => {
+        if (sosState === 'COMMAND_LISTENING') {
+            startRecognition('command');
+        }
+    });
+}
+
+function recognizeCommand(text) {
+    const lower = text.toLowerCase().replace(/\s+/g, ' ').trim();
+
+    for (const phrase of EMERGENCY_COMMAND_PHRASES) {
+        if (lower.includes(phrase)) {
+            return 'EMERGENCY';
+        }
+    }
+
+    for (const phrase of BUZZER_ON_PHRASES) {
+        if (lower.includes(phrase)) {
+            return 'BUZZER_ON';
+        }
+    }
+
+    for (const phrase of BUZZER_OFF_PHRASES) {
+        if (lower.includes(phrase)) {
+            return 'BUZZER_OFF';
+        }
+    }
+
+    return 'UNKNOWN';
+}
+
+function handleCommandResult(finalTranscript, interimTranscript) {
+    if (!finalTranscript) return;
+
+    if (finalTranscript.toLowerCase().includes('cancel') ||
+        finalTranscript.toLowerCase().includes('never mind') ||
+        finalTranscript.toLowerCase().includes('stop')) {
+        returnToPassive();
+        return;
+    }
+
+    const command = recognizeCommand(finalTranscript);
+
+    switch (command) {
+        case 'EMERGENCY':
+            stopRecognition();
+            startVoiceCapture();
+            break;
+        case 'BUZZER_ON':
+        case 'BUZZER_OFF':
+            stopRecognition();
+            sosState = 'EXECUTING_COMMAND';
+            updateHandsfreeUI();
+            executeBuzzerCommand(command);
+            break;
+        default:
+            stopRecognition();
+            sosState = 'COMMAND_LISTENING';
+            updateHandsfreeUI();
+            speak(COMMAND_UNKNOWN_RESPONSE, () => {
+                if (sosState === 'COMMAND_LISTENING' && handsFreeEnabled) {
+                    startRecognition('command');
+                }
+            });
+    }
+}
+
+async function executeBuzzerCommand(command) {
+    const commandName = command === 'BUZZER_ON' ? 'BUZZER_ON' : 'BUZZER_OFF';
+    const desiredOn = command === 'BUZZER_ON';
+    let succeeded = false;
+
+    try {
+        const response = await fetch(BUZZER_ENDPOINT, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
+            body: JSON.stringify({ command: commandName })
+        });
+        if (response.ok) {
+            const result = await response.json();
+            buzzerState = result.state || (desiredOn ? 'ON' : 'OFF');
+            updateBuzzerStateUI();
+            succeeded = true;
+        } else {
+            console.warn('[Voice Command] Buzzer endpoint rejected:', response.status);
+        }
+    } catch (error) {
+        console.warn('[Voice Command] Failed to send buzzer command:', error.message || error);
+        setBackendStatus(false);
+    }
+
+    if (succeeded) {
+        const text = desiredOn ? 'Buzzer turned on.' : 'Buzzer turned off.';
+        speak(text, () => {
+            returnToPassive();
+        });
+    } else {
+        speak('I could not reach the device to change the buzzer. Please try again.', () => {
+            returnToPassive();
+        });
+    }
+}
+
+function returnToPassive() {
+    stopRecognition();
+    if (handsFreeEnabled) {
+        startPassiveListening();
+    } else {
+        sosState = 'IDLE';
+        updateHandsfreeUI();
+    }
+}
+
+function updateBuzzerStateUI() {
+    if (!buzzerStateEl || !buzzerStateText) return;
+    if (buzzerState === null) {
+        buzzerStateEl.hidden = true;
+        return;
+    }
+    buzzerStateEl.hidden = false;
+    const isOn = buzzerState === 'ON';
+    buzzerStateText.textContent = isOn ? 'Buzzer: On' : 'Buzzer: Off';
+    buzzerStateEl.classList.toggle('on', isOn);
+    buzzerStateEl.classList.toggle('off', !isOn);
+}
+
+async function fetchBuzzerState() {
+    try {
+        const response = await fetch(BUZZER_ENDPOINT, { headers: { 'Accept': 'application/json' } });
+        if (response.ok) {
+            const result = await response.json();
+            buzzerState = result.state;
+            updateBuzzerStateUI();
+        }
+    } catch (error) {
+        console.warn('[Blind Client] Failed to fetch buzzer state:', error.message || error);
+    }
+}
+
+function setSosState(newState) {
+    sosState = newState;
+    updateHandsfreeUI();
+}
+
+function initRecognition() {
+    const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+    if (!SpeechRecognition) return null;
+    const recognition = new SpeechRecognition();
+    recognition.continuous = true;
+    recognition.interimResults = true;
+    recognition.lang = 'en-US';
+    return recognition;
+}
+
+function shouldDeclareWake(transcript) {
+    const lower = transcript.toLowerCase().replace(/[^a-z\s']/g, ' ').replace(/\s+/g, ' ').trim();
+    for (const phrase of WAKE_PHRASES) {
+        if (lower === phrase || lower.startsWith(phrase + ' ') || lower.endsWith(' ' + phrase) || lower.includes(' ' + phrase + ' ') || lower.includes(phrase + '.')) {
+            return true;
+        }
+    }
+    return false;
+}
+
+function startRecognition(mode) {
+    stopRecognition(false);
+    const recognition = initRecognition();
+    if (!recognition) {
+        if (mode === 'capture') {
+            setEmergencyFeedback('Speech recognition unavailable. Please try again.', false);
+        } else if (mode === 'passive') {
+            setHandsfreeDenied('Speech recognition is not supported in this browser.');
+            return;
+        }
+        sosState = 'IDLE';
+        setMicListening(false);
+        updateHandsfreeUI();
+        return;
+    }
+
+    sosRecognition = recognition;
+
+    recognition.onresult = (event) => {
+        let finalTranscript = '';
+        let interimTranscript = '';
+
+        for (let i = event.resultIndex; i < event.results.length; i++) {
+            const transcript = event.results[i][0].transcript;
+            if (event.results[i].isFinal) {
+                finalTranscript += transcript;
+            } else {
+                interimTranscript += transcript;
+            }
+        }
+
+        if (mode === 'passive') {
+            handlePassiveResult(finalTranscript, interimTranscript);
+        } else if (mode === 'command') {
+            handleCommandResult(finalTranscript, interimTranscript);
+        } else if (mode === 'capture') {
+            handleCaptureResult(finalTranscript, interimTranscript);
+        } else if (mode === 'confirm') {
+            handleConfirmResult(finalTranscript);
+        }
+    };
+
+    recognition.onend = () => {
+        sosRecognition = null;
+        if (mode === 'passive' && sosState === 'PASSIVE_LISTENING' && handsFreeEnabled) {
+            schedulePassiveRestart();
+        } else if (mode === 'command' && (sosState === 'COMMAND_LISTENING' || sosState === 'EXECUTING_COMMAND')) {
+            try { restartRecognitionIfNeeded(recognition); } catch (e) { /* already started */ }
+        } else if (mode === 'capture' && sosState === 'LISTENING_FOR_EMERGENCY') {
+            try { restartRecognitionIfNeeded(recognition); } catch (e) { /* already started */ }
+        } else if (mode === 'confirm' && sosState === 'CONFIRMING_MESSAGE') {
+            try { restartRecognitionIfNeeded(recognition); } catch (e) { /* already started */ }
+        }
+    };
+
+    recognition.onerror = (event) => {
+        if (event.error === 'no-speech') return;
+        if (event.error === 'aborted') return;
+        console.warn('[Voice SOS] Recognition error:', event.error);
+        if (event.error === 'not-allowed' || event.error === 'service-not-allowed') {
+            if (mode === 'passive') {
+                setHandsfreeDenied('Microphone access denied.');
+            } else if (mode === 'command') {
+                sosState = 'IDLE';
+                updateHandsfreeUI();
+            } else {
+                setEmergencyFeedback('Microphone access denied. Please allow microphone and try again.', false);
+                setMicListening(false);
+                stopPassiveListening();
+                sosState = 'IDLE';
+            }
+        }
+    };
+
+    try {
+        recognition.start();
+    } catch (e) {
+        console.warn('[Voice SOS] Failed to start recognition:', e);
+        if (mode === 'passive') {
+            setHandsfreeDenied('Microphone access error.');
+        } else {
+            sosState = 'IDLE';
+            setMicListening(false);
+        }
+    }
+}
+
+function restartRecognitionIfNeeded(recognition) {
+    if (sosRecognition === recognition) {
+        recognition.start();
+    }
+}
+
+function schedulePassiveRestart() {
+    clearTimeout(passiveRestartTimer);
+    if (!handsFreeEnabled || sosState !== 'PASSIVE_LISTENING') return;
+    if (passiveRestartCount > 4) {
+        passiveRestartCount = 0;
+        passiveRestartTimer = setTimeout(() => {
+            passiveRestartCount = 0;
+            if (handsFreeEnabled && sosState === 'PASSIVE_LISTENING') startRecognition('passive');
+        }, 3000);
+        return;
+    }
+    passiveRestartCount += 1;
+    passiveRestartTimer = setTimeout(() => {
+        if (handsFreeEnabled && sosState === 'PASSIVE_LISTENING') startRecognition('passive');
+    }, 600);
+}
+
+function handlePassiveResult(finalTranscript, interimTranscript) {
+    if (finalTranscript && shouldDeclareWake(finalTranscript)) {
+        stopRecognition();
+        startCommandListening();
+    }
+}
+
+function stopRecognition(resetState) {
+    clearTimeout(passiveRestartTimer);
+    passiveRestartTimer = null;
+    passiveRestartCount = 0;
+    if (sosRecognition) {
+        try { sosRecognition.abort(); } catch (e) { /* ignore */ }
+        sosRecognition = null;
+    }
+    if (resetState !== false) {
+        setMicListening(false);
+    }
+}
+
+function handleCaptureResult(finalTranscript, interimTranscript) {
+    if (finalTranscript) {
+        const lower = finalTranscript.toLowerCase().trim();
+        if (lower.includes('done') || lower.includes('finished') || lower.includes('that\'s it') || lower.includes('send')) {
+            if (sosCapturedMessage.trim()) {
+                transitionToConfirm();
+                return;
+            }
+        }
+        if (lower.includes('cancel') || lower.includes('never mind') || lower.includes('stop')) {
+            stopVoiceCapture();
+            return;
+        }
+        sosCapturedMessage += (sosCapturedMessage ? ' ' : '') + finalTranscript;
+    }
+    const displayText = sosCapturedMessage + (interimTranscript ? ' ' + interimTranscript : '');
+    if (displayText.trim()) {
+        setEmergencyFeedback('Capturing: "' + displayText.trim() + '"', true);
+    } else {
+        setEmergencyFeedback('I\'m listening. Please tell me what happened.', true);
+    }
+}
+
+function transitionToConfirm() {
+    stopRecognition();
+    sosState = 'CONFIRMING_MESSAGE';
+    emergencySection.classList.remove('active');
+    confirmationCard.classList.add('active');
+    confirmationMessage.textContent = sosCapturedMessage;
+    confirmSendBtn.disabled = true;
+    confirmFeedback.textContent = 'Say "yes" / "send it" to confirm, or "no" / "cancel" to cancel.';
+    confirmFeedback.classList.remove('ok', 'bad');
+    updateHandsfreeUI();
+    speak('You said: ' + sosCapturedMessage + '. Should I send an emergency alert?', () => {
+        if (sosState === 'CONFIRMING_MESSAGE') {
+            confirmSendBtn.disabled = false;
+            startRecognition('confirm');
+        }
+    });
+    sosConfirmationTimer = setTimeout(() => {
+        if (sosState === 'CONFIRMING_MESSAGE') {
+            setConfirmFeedback('No response received. Emergency alert cancelled.', true);
+            setTimeout(() => abortVoiceSos(), 2000);
+        }
+    }, 15000);
+}
+
+function handleConfirmResult(transcript) {
+    if (!transcript) return;
+    const lower = transcript.toLowerCase().trim();
+    let confirmed = false;
+    let cancelled = false;
+
+    for (const phrase of CONFIRMATION_YES) {
+        if (lower.includes(phrase)) {
+            confirmed = true;
+            break;
+        }
+    }
+
+    if (!confirmed) {
+        for (const phrase of CONFIRMATION_NO) {
+            if (lower.includes(phrase)) {
+                cancelled = true;
+                break;
+            }
+        }
+    }
+
+    if (confirmed) {
+        transitionToSend();
+    } else if (cancelled) {
+        abortVoiceSos();
+    }
+}
+
+function setConfirmFeedback(text, isCancel) {
+    confirmFeedback.textContent = text;
+    confirmFeedback.classList.remove('ok', 'bad');
+    confirmFeedback.classList.add(isCancel ? 'bad' : 'ok');
+}
+
+function transitionToSend() {
+    stopRecognition();
+    sosState = 'SENDING_SOS';
+    confirmSendBtn.disabled = true;
+    if (sosConfirmationTimer) {
+        clearTimeout(sosConfirmationTimer);
+        sosConfirmationTimer = null;
+    }
+    setConfirmFeedback('Sending emergency alert...', false);
+    sendSosAlert();
+}
+
+async function sendSosAlert() {
+    if (sosSent) return;
+    sosSent = true;
+
+    let lat, lng;
+    if (simEnabled) {
+        lat = simLat;
+        lng = simLng;
+    } else if (lastPosition) {
+        lat = lastPosition.coords.latitude;
+        lng = lastPosition.coords.longitude;
+    } else {
+        try {
+            const pos = await new Promise((resolve, reject) => {
+                navigator.geolocation.getCurrentPosition(resolve, reject, {
+                    enableHighAccuracy: true,
+                    timeout: 8000,
+                    maximumAge: 10000
+                });
+            });
+            lat = pos.coords.latitude;
+            lng = pos.coords.longitude;
+        } catch (e) {
+            lat = PHONE_COORDS.latitude;
+            lng = PHONE_COORDS.longitude;
+        }
+    }
+
+    const locationOk = await sendLocation(lat, lng);
+    const alertId = `VOICE-SOS-${Date.now()}-${Math.floor(Math.random() * 1000)}`;
+    const payload = {
+        alertId,
+        trigger: 'SOS',
+        status: 'ACTIVE',
+        heartRate: null,
+        latitude: lat,
+        longitude: lng,
+        message: sosCapturedMessage,
+        timestamp: new Date().toISOString()
+    };
+
+    let alertOk = false;
+    try {
+        const response = await fetch(EVENTS_ENDPOINT, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
+            body: JSON.stringify(payload)
+        });
+        alertOk = response.ok;
+        if (!alertOk) {
+            throw new Error(`HTTP ${response.status}`);
+        }
+    } catch (error) {
+        console.warn('[Voice SOS] Failed to POST SOS event:', error.message || error);
+    }
+
+    if (alertOk) {
+        sosState = 'SUCCESS';
+        if (locationOk) {
+            setConfirmFeedback('Emergency alert activated. Your location and message have been sent.', false);
+            speak('Emergency alert activated. Your location and message have been sent.', () => {
+                setTimeout(() => resetVoiceSos(), 2000);
+            });
+        } else {
+            setConfirmFeedback('Emergency alert sent. Location sync failed but your message was delivered.', false);
+            speak('Emergency alert sent. Location sync failed but your message was delivered.', () => {
+                setTimeout(() => resetVoiceSos(), 2000);
+            });
+        }
+    } else {
+        sosState = 'ERROR';
+        setConfirmFeedback('I could not send the emergency alert. Please try again.', true);
+        speak('I could not send the emergency alert. Please try again.', () => {
+            setTimeout(() => resetVoiceSos(), 2000);
+        });
+    }
+}
+
+function abortVoiceSos() {
+    stopRecognition();
+    if (sosConfirmationTimer) {
+        clearTimeout(sosConfirmationTimer);
+        sosConfirmationTimer = null;
+    }
+    sosState = 'CANCELLED';
+    confirmationCard.classList.remove('active');
+    emergencySection.classList.remove('active');
+    setMicListening(false);
+    speak('Emergency alert was cancelled.', () => {
+        setTimeout(() => resetVoiceSos(), 1000);
+    });
+}
+
+function stopVoiceCapture() {
+    stopRecognition();
+    if (sosConfirmationTimer) {
+        clearTimeout(sosConfirmationTimer);
+        sosConfirmationTimer = null;
+    }
+    if ('speechSynthesis' in window) {
+        window.speechSynthesis.cancel();
+    }
+    sosState = 'IDLE';
+    sosCapturedMessage = '';
+    sosSent = false;
+    emergencySection.classList.remove('active');
+    confirmationCard.classList.remove('active');
+    setMicListening(false);
+    updateHandsfreeUI();
+}
+
+function resetVoiceSos() {
+    sosState = 'IDLE';
+    sosCapturedMessage = '';
+    sosSent = false;
+    sosRecognition = null;
+    sosConfirmationTimer = null;
+    emergencySection.classList.remove('active');
+    confirmationCard.classList.remove('active');
+    setMicListening(false);
+    if (handsFreeEnabled) {
+        startPassiveListening();
+    } else {
+        updateHandsfreeUI();
+    }
 }
 
 /* ── Location ──────────────────────────────────────────────── */
@@ -615,6 +1373,7 @@ async function checkBackend() {
     } catch (error) {
         setBackendStatus(false);
     }
+    fetchBuzzerState();
 }
 
 startBtn.addEventListener('click', toggleSharing);
@@ -634,6 +1393,12 @@ obstacleButtons.forEach((btn) => {
     btn.addEventListener('click', () => sendDemoEvent(btn.getAttribute('data-direction')));
 });
 
+micSosBtn.addEventListener('click', toggleMicSos);
+emergencyCancelBtn.addEventListener('click', stopVoiceCapture);
+confirmSendBtn.addEventListener('click', transitionToSend);
+confirmCancelBtn.addEventListener('click', abortVoiceSos);
+handsfreeToggle.addEventListener('change', toggleHandsFree);
+
 setVoiceState('disabled');
 setConnState('disconnected');
 setBackendStatus(false);
@@ -641,4 +1406,5 @@ setGpsStatus('Waiting', 'idle');
 simToggle.checked = false;
 simPanelBlock.style.display = 'none';
 setInterval(checkBackend, 10000);
+updateBuzzerStateUI();
 checkBackend();

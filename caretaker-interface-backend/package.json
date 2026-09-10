@@ -4,12 +4,14 @@
   "description": "Backend for the Smart Assistive Cap Caretaker Console",
   "main": "server.js",
   "scripts": {
-    "start": "node server.js"
+    "start": "node server.js",
+    "start:env": "node --env-file-if-exists=.env server.js"
   },
   "license": "UNLICENSED",
   "private": true,
   "dependencies": {
     "cors": "^2.8.6",
-    "express": "^5.2.1"
+    "express": "^5.2.1",
+    "mqtt": "^5.15.2"
   }
 }

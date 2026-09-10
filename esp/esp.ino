@@ -1,0 +1,927 @@
+// ============================================
+// STEP 9: INTELLIGENT RADAR + DIRECTION + BUZZER
+// ESP32 + SG90 + HC-SR04 + Buzzer
+// ============================================
+//
+// B-MQTT-3: Added Wi-Fi + secure MQTT publishing (PubSubClient + WiFiClientSecure).
+// The existing local radar / servo / distance / direction / buzzer behavior is
+// preserved verbatim. MQTT publish failures must never stop local obstacle detection.
+
+#include <Wire.h>
+#include <ESP32Servo.h>
+#include <WiFi.h>
+#include <WiFiClientSecure.h>
+#include <PubSubClient.h>
+#include "MAX30105.h"
+#include "heartRate.h"
+
+
+// ============================================
+// WI-FI + MQTT CONFIGURATION
+// ============================================
+//
+// NOTE: DO NOT commit real HiveMQ credentials here.
+// Replace these placeholders with your own values at flash time.
+//
+// Wi-Fi
+#define WIFI_SSID       "Redmi8"
+#define WIFI_PASSWORD   "Omkar9876"
+
+// HiveMQ Cloud TLS broker (mqtts:// -> port 8883)
+#define MQTT_HOST       "e0437b73dad44fceb8caea050bbdc398.s1.eu.hivemq.cloud"
+#define MQTT_PORT       8883
+#define MQTT_USERNAME   "Omkar"
+#define MQTT_PASSWORD   "omkar9876"
+#define MQTT_CLIENT_ID  "BG001-ESP32"   // must be unique on the broker
+
+#define MQTT_TOPIC_RADAR   "blindguardian/sensor/radar"
+#define MQTT_TOPIC_STATUS  "blindguardian/device/status"
+#define MQTT_TOPIC_HEART   "blindguardian/sensor/heart"
+
+// Device id reported in payloads
+#define DEVICE_ID "BG001"
+
+
+// ============================================
+// PIN CONFIGURATION
+// ============================================
+
+#define TRIG_PIN 5
+#define ECHO_PIN 18
+#define SERVO_PIN 13
+#define BUZZER_PIN 19
+
+// MAX30102 heart-rate sensor
+#define SDA_PIN 21
+#define SCL_PIN 22
+#define LED_PIN 2
+
+
+// ============================================
+// SETTINGS
+// ============================================
+
+#define OBSTACLE_DISTANCE 100
+
+
+// ============================================
+// OBJECTS AND VARIABLES
+// ============================================
+
+Servo radarServo;
+
+long duration;
+float distance;
+
+WiFiClientSecure secureClient;
+PubSubClient mqttClient(secureClient);
+
+unsigned long lastReconnectAttempt = 0;
+
+
+// ============================================
+// MAX30102 HEART-RATE SENSOR
+// ============================================
+
+// MAX30105 driver (register-compatible with the MAX30102)
+MAX30105 particleSensor;
+
+// The sensor is optional — a missing MAX30102 must not stop the system
+bool heartSensorPresent = false;
+
+// MAX30102 algorithm state (used only inside the HR sampling task)
+const byte RATE_SIZE = 4;
+byte rates[RATE_SIZE];
+byte rateSpot = 0;
+long lastBeat = 0;
+float beatsPerMinute = 0;
+int beatAvg = 0;
+
+// Heartbeat LED timing (HR task only)
+bool ledActive = false;
+unsigned long ledOffTime = 0;
+
+// Shared state: written by the HR sampling task, read by the main loop
+// for MQTT publishing. The HR task NEVER touches MQTT/WiFi.
+volatile bool latestFingerDetected = false;
+volatile byte latestHeartRate = 0;
+volatile bool newHeartReading = false;
+
+
+// ============================================
+// MONITOR HEART RATE (HR TASK ONLY)
+// ============================================
+
+void monitorHeartRate() {
+
+  // IR value indicates blood-perfusion / finger presence
+  long irValue = particleSensor.getIR();
+
+  // ------------------------------------------
+  // FINGER NOT DETECTED
+  // ------------------------------------------
+
+  if (irValue < 50000) {
+
+    digitalWrite(LED_PIN, LOW);
+
+    if (latestFingerDetected == true) {
+
+      Serial.println();
+
+      Serial.println("HEART SENSOR: Finger removed");
+
+      latestFingerDetected = false;
+
+    }
+
+    return;
+
+  }
+
+  // ------------------------------------------
+  // FINGER DETECTED
+  // ------------------------------------------
+
+  if (latestFingerDetected == false) {
+
+    Serial.println();
+
+    Serial.println("HEART SENSOR: Finger detected");
+
+    latestFingerDetected = true;
+
+  }
+
+  // ------------------------------------------
+  // HEARTBEAT DETECTION
+  // ------------------------------------------
+
+  if (checkForBeat(irValue)) {
+
+    // Heartbeat LED flash
+    digitalWrite(LED_PIN, HIGH);
+
+    ledActive = true;
+
+    ledOffTime = millis();
+
+    // Instantaneous BPM from inter-beat interval
+    long delta = millis() - lastBeat;
+
+    lastBeat = millis();
+
+    if (delta > 300 && delta < 3000) {
+
+      beatsPerMinute = 60.0 / (delta / 1000.0);
+
+      // Accept realistic BPM
+      if (beatsPerMinute > 30 && beatsPerMinute < 220) {
+
+        // Keep the esp2.ino-style ring buffer for diagnostics
+        rates[rateSpot++] = (byte)beatsPerMinute;
+
+        rateSpot %= RATE_SIZE;
+
+        beatAvg = 0;
+
+        for (byte i = 0; i < RATE_SIZE; i++) {
+
+          beatAvg += rates[i];
+
+        }
+
+        beatAvg /= RATE_SIZE;
+
+        Serial.println();
+
+        Serial.println("******** HEARTBEAT DETECTED ********");
+
+        Serial.print("Current BPM: ");
+
+        Serial.println(beatsPerMinute);
+
+        // Share the INSTANTANEOUS BPM with the main loop
+        // (not the zero-filled ring-buffer average)
+        latestHeartRate = (byte)beatsPerMinute;
+
+        newHeartReading = true;
+
+      }
+
+    }
+
+  }
+
+  // ------------------------------------------
+  // TURN LED OFF AFTER 80ms
+  // ------------------------------------------
+
+  if (ledActive == true) {
+
+    if (millis() - ledOffTime >= 80) {
+
+      digitalWrite(LED_PIN, LOW);
+
+      ledActive = false;
+
+    }
+
+  }
+
+}
+
+
+// ============================================
+// HEART RATE SAMPLING TASK
+// ============================================
+
+// FreeRTOS task that samples the MAX30102 ~every 20 ms.
+// The main loop is blocked by radar/servo/buzzer/pulseIn(), so the
+// heart sensor runs on its own task to avoid missing beats.
+// No WiFi / MQTT / PubSubClient access from this task.
+
+void heartRateSamplingTask(void* pvParameters) {
+
+  for (;;) {
+
+    if (heartSensorPresent == true) {
+
+      monitorHeartRate();
+
+    }
+
+    vTaskDelay(20 / portTICK_PERIOD_MS);
+
+  }
+
+}
+
+
+// ============================================
+// SETUP
+// ============================================
+
+void setup() {
+
+  Serial.begin(115200);
+
+
+  // HC-SR04
+
+  pinMode(TRIG_PIN, OUTPUT);
+  pinMode(ECHO_PIN, INPUT);
+
+
+  // Buzzer
+
+  pinMode(BUZZER_PIN, OUTPUT);
+
+  digitalWrite(BUZZER_PIN, LOW);
+
+// Servo
+
+  radarServo.attach(SERVO_PIN);
+
+
+  // ------------------------------------------
+  // MAX30102 HEART-RATE SENSOR (OPTIONAL)
+  // ------------------------------------------
+
+  pinMode(LED_PIN, OUTPUT);
+
+  digitalWrite(LED_PIN, LOW);
+
+  Wire.begin(SDA_PIN, SCL_PIN);
+
+  Serial.println();
+
+  Serial.println("Checking MAX30102...");
+
+  if (!particleSensor.begin(Wire, I2C_SPEED_FAST)) {
+
+    Serial.println("MAX30102 NOT FOUND. Heart monitoring disabled (radar/MQTT continue).");
+
+    heartSensorPresent = false;
+
+  }
+
+  else {
+
+    Serial.println("MAX30102 CONNECTED!");
+
+    heartSensorPresent = true;
+
+    particleSensor.setup();
+
+    particleSensor.setPulseAmplitudeRed(0x0A);
+
+    particleSensor.setPulseAmplitudeGreen(0);
+
+  }
+
+  // Dedicated non-blocking heart-rate sampling task
+  xTaskCreatePinnedToCore(heartRateSamplingTask, "heartRate", 4096, NULL, 1, NULL, tskNO_AFFINITY);
+
+
+  Serial.println();
+
+  Serial.println("======================================");
+  Serial.println("INTELLIGENT RADAR SYSTEM");
+  Serial.println("WITH BUZZER ALERT");
+  Serial.println("======================================");
+
+  // ------------------------------------------
+  // CONFIGURE MQTT CLIENT
+  // ------------------------------------------
+
+  secureClient.setInsecure();  // Dev: accepts any peer cert (HiveMQ Cloud TLS).
+                               // For production, pin the HiveMQ CA bundle instead.
+
+  mqttClient.setServer(MQTT_HOST, MQTT_PORT);
+
+  // ------------------------------------------
+  // CONNECT TO WI-FI (non-blocking for local radar)
+  // ------------------------------------------
+
+  WiFi.mode(WIFI_STA);
+  WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
+
+  Serial.println();
+  Serial.print("Connecting to Wi-Fi");
+
+  unsigned long wifiStart = millis();
+
+  while (WiFi.status() != WL_CONNECTED && millis() - wifiStart < 15000) {
+
+    delay(500);
+    Serial.print(".");
+
+  }
+
+  Serial.println();
+
+  if (WiFi.status() == WL_CONNECTED) {
+
+    Serial.print("Wi-Fi connected. IP: ");
+    Serial.println(WiFi.localIP());
+
+    // Sync real time (needed for ISO-8601 radar timestamps)
+    configTime(0, 0, "pool.ntp.org", "time.nist.gov");
+
+  }
+
+  else {
+
+    Serial.println("Wi-Fi connection failed. Continuing local radar only.");
+
+  }
+
+  // Attempt initial MQTT connection (best effort)
+  connectMqtt();
+
+}
+
+
+// ============================================
+// FORMAT ISO-8601 TIMESTAMP FUNCTION
+// ============================================
+//
+// Returns "YYYY-MM-DDTHH:MM:SSZ" in UTC when time is synced.
+// Falls back to a stable placeholder if NTP is not ready so the
+// payload always stays a valid ISO-8601 string for the backend.
+
+String iso8601Now() {
+
+  time_t now = time(nullptr);
+  struct tm tmv = { 0 };
+  gmtime_r(&now, &tmv);
+
+  // If RTC/NTP not yet synced (year < 2024), use an explicit placeholder
+  if (tmv.tm_year < (2024 - 1900)) {
+
+    return "2026-09-08T09:20:00Z";
+
+  }
+
+  char buffer[24];
+
+  snprintf(buffer, sizeof(buffer), "%04d-%02d-%02dT%02d:%02d:%02dZ",
+           tmv.tm_year + 1900, tmv.tm_mon + 1, tmv.tm_mday,
+           tmv.tm_hour, tmv.tm_min, tmv.tm_sec);
+
+  return String(buffer);
+
+}
+
+
+// ============================================
+// GET DANGER LEVEL FUNCTION
+// ============================================
+//
+// Derives a `danger` value from the existing thresholds used
+// for printing in processReading(). There was no previous
+// stored `danger` classification in the firmware, so this is
+// the new field required by the radar MQTT payload.
+//
+//   distance < 20  -> CRITICAL
+//   distance < 50  -> HIGH
+//   distance <= OBSTACLE_DISTANCE -> MEDIUM
+//   else           -> LOW
+
+String getDanger(float distance) {
+
+  if (distance == -1) {
+
+    return "LOW";
+
+  }
+
+  else if (distance < 20) {
+
+    return "CRITICAL";
+
+  }
+
+  else if (distance < 50) {
+
+    return "HIGH";
+
+  }
+
+  else if (distance <= OBSTACLE_DISTANCE) {
+
+    return "MEDIUM";
+
+  }
+
+  else {
+
+    return "LOW";
+
+  }
+
+}
+
+
+// ============================================
+// MQTT CONNECTION FUNCTION
+// ============================================
+
+bool connectMqtt() {
+
+  // No point attempting without a network link
+  if (WiFi.status() != WL_CONNECTED) {
+
+    return false;
+
+  }
+
+  if (mqttClient.connected()) {
+
+    return true;
+
+  }
+
+  Serial.println();
+  Serial.print("Attempting MQTT connection...");
+
+  if (mqttClient.connect(MQTT_CLIENT_ID, MQTT_USERNAME, MQTT_PASSWORD)) {
+
+    Serial.println(" connected.");
+    publishDeviceStatus("ONLINE", "CONNECTED");
+
+    return true;
+
+  }
+
+  else {
+
+    Serial.print(" failed, state=");
+    Serial.print(mqttClient.state());
+    Serial.println(" (continuing local radar)");
+
+    return false;
+
+  }
+
+}
+
+
+// ============================================
+// KEEP MQTT PROCESSED (non-blocking) FUNCTION
+// ============================================
+
+void maintainMqtt() {
+
+  // Reconnect at most every 5s while disconnected (non-blocking)
+  if (!mqttClient.connected()) {
+
+    unsigned long now = millis();
+
+    if (now - lastReconnectAttempt > 5000) {
+
+      lastReconnectAttempt = now;
+      connectMqtt();
+
+    }
+
+    return;
+
+  }
+
+  mqttClient.loop();
+
+}
+
+
+// ============================================
+// PUBLISH DEVICE STATUS FUNCTION
+// ============================================
+
+void publishDeviceStatus(const char* status, const char* wifiState) {
+
+  if (!mqttClient.connected()) {
+
+    return;
+
+  }
+
+  String payload = String("{\"deviceId\":\"") + DEVICE_ID +
+                   "\",\"status\":\"" + status +
+                   "\",\"wifi\":\"" + wifiState + "\"}";
+
+  mqttClient.publish(MQTT_TOPIC_STATUS, payload.c_str());
+
+}
+
+
+// ============================================
+// PUBLISH RADAR READING FUNCTION
+// ============================================
+
+void publishRadarReading(int angle, float readingDistance, String direction) {
+
+  if (!mqttClient.connected()) {
+
+    // Do not block local safety behavior on the cloud
+    return;
+
+  }
+
+  // ISO-8601 UTC timestamp (backend expects a valid Date.parse-able string)
+  String timestamp = iso8601Now();
+
+  String payload = String("{\"deviceId\":\"") + DEVICE_ID +
+                   "\",\"distance\":" + String(readingDistance, 1) +
+                   ",\"angle\":" + String(angle) +
+                   ",\"direction\":\"" + direction +
+                   "\",\"danger\":\"" + getDanger(readingDistance) +
+                   "\",\"timestamp\":\"" + timestamp + "\"}";
+
+  mqttClient.publish(MQTT_TOPIC_RADAR, payload.c_str());
+
+}
+
+
+// ============================================
+// PUBLISH HEART-RATE READING FUNCTION
+// ============================================
+//
+// Main loop only — never called from the HR sampling task.
+// Best effort like publishRadarReading(): skips silently when the
+// MQTT client is disconnected or no new beat is available.
+
+void publishHeartReading() {
+
+  if (!heartSensorPresent || !mqttClient.connected()) {
+
+    return;
+
+  }
+
+  if (!newHeartReading || !latestFingerDetected) {
+
+    return;
+
+  }
+
+  newHeartReading = false;
+
+  String timestamp = iso8601Now();
+
+  String payload = String("{\"deviceId\":\"") + DEVICE_ID +
+                   "\",\"heartRate\":" + String(latestHeartRate) +
+                   ",\"fingerDetected\":" + (latestFingerDetected ? "true" : "false") +
+                   ",\"timestamp\":\"" + timestamp + "\"}";
+
+  mqttClient.publish(MQTT_TOPIC_HEART, payload.c_str());
+
+}
+
+
+// ============================================
+// MEASURE DISTANCE FUNCTION
+// ============================================
+
+float measureDistance() {
+
+  // Clear trigger
+
+  digitalWrite(TRIG_PIN, LOW);
+  delayMicroseconds(2);
+
+
+  // Send ultrasonic pulse
+
+  digitalWrite(TRIG_PIN, HIGH);
+  delayMicroseconds(10);
+  digitalWrite(TRIG_PIN, LOW);
+
+
+  // Read echo
+
+  duration = pulseIn(ECHO_PIN, HIGH, 30000);
+
+
+  // No echo received
+
+  if (duration == 0) {
+
+    return -1;
+
+  }
+
+
+  // Calculate distance
+
+  float calculatedDistance;
+
+  calculatedDistance = duration * 0.0343 / 2;
+
+
+  return calculatedDistance;
+
+}
+
+
+// ============================================
+// GET DIRECTION FUNCTION
+// ============================================
+
+String getDirection(int angle) {
+
+  if (angle >= 20 && angle <= 60) {
+
+    return "LEFT";
+
+  }
+
+  else if (angle >= 61 && angle <= 120) {
+
+    return "CENTER";
+
+  }
+
+  else {
+
+    return "RIGHT";
+
+  }
+
+}
+
+
+// ============================================
+// BUZZER ALERT FUNCTION
+// ============================================
+
+void buzzerAlert(float distance) {
+
+
+  // ------------------------------------------
+  // OUT OF RANGE OR CLEAR
+  // ------------------------------------------
+
+  if (distance == -1 || distance > 200) {
+
+    digitalWrite(BUZZER_PIN, LOW);
+
+  }
+
+
+  // ------------------------------------------
+  // 50 - 100 CM
+  // SLOW BEEP
+  // ------------------------------------------
+
+  else if (distance >= 100 && distance <= 200) {
+
+    digitalWrite(BUZZER_PIN, HIGH);
+    delay(150);
+
+    digitalWrite(BUZZER_PIN, LOW);
+    delay(350);
+
+  }
+
+
+  // ------------------------------------------
+  // 20 - 49 CM
+  // FAST BEEP
+  // ------------------------------------------
+
+  else if (distance >= 30 && distance < 100) {
+
+    digitalWrite(BUZZER_PIN, HIGH);
+    delay(120);
+
+    digitalWrite(BUZZER_PIN, LOW);
+    delay(120);
+
+  }
+
+
+  // ------------------------------------------
+  // BELOW 20 CM
+  // CONTINUOUS BEEP
+  // ------------------------------------------
+
+  else if (distance < 30) {
+
+    digitalWrite(BUZZER_PIN, HIGH);
+    delay(400);
+
+    digitalWrite(BUZZER_PIN, LOW);
+
+  }
+
+}
+
+
+// ============================================
+// PROCESS RADAR READING
+// ============================================
+
+void processReading(int angle) {
+
+
+  // Move servo
+
+  radarServo.write(angle);
+
+
+  // Wait for servo to reach position
+
+  delay(400);
+
+
+  // Measure distance
+
+  distance = measureDistance();
+
+
+  // Get direction
+
+  String direction = getDirection(angle);
+
+
+  // ------------------------------------------
+  // DISPLAY SCAN INFORMATION
+  // ------------------------------------------
+
+  Serial.println("--------------------------------------");
+
+
+  Serial.print("Angle: ");
+  Serial.print(angle);
+  Serial.println(" degrees");
+
+
+  Serial.print("Direction: ");
+  Serial.println(direction);
+
+
+  // ------------------------------------------
+  // CHECK DISTANCE
+  // ------------------------------------------
+
+  if (distance == -1) {
+
+    Serial.println("Distance: Out of Range");
+
+    Serial.println("Status: CLEAR");
+
+  }
+
+  else {
+
+    Serial.print("Distance: ");
+    Serial.print(distance);
+    Serial.println(" cm");
+
+
+    // ----------------------------------------
+    // CHECK OBSTACLE
+    // ----------------------------------------
+
+    if (distance <= OBSTACLE_DISTANCE) {
+
+      Serial.println("STATUS: OBSTACLE DETECTED!");
+
+
+      if (distance < 20) {
+
+        Serial.println("WARNING: CRITICAL DANGER!");
+
+      }
+
+      else if (distance < 50) {
+
+        Serial.println("WARNING: CLOSE DANGER!");
+
+      }
+
+      else {
+
+        Serial.println("WARNING: OBSTACLE AHEAD");
+
+      }
+
+    }
+
+    else {
+
+      Serial.println("Status: CLEAR");
+
+    }
+
+  }
+
+
+  // ------------------------------------------
+  // ACTIVATE BUZZER
+  // ------------------------------------------
+
+  buzzerAlert(distance);
+
+
+  // ------------------------------------------
+  // PUBLISH RADAR READING (MQTT, best effort)
+  // ------------------------------------------
+  //
+  // One publish per processed reading after the measurement is
+  // complete. If MQTT is disconnected this is a no-op, so local
+  // obstacle detection is never blocked by the cloud.
+
+  publishRadarReading(angle, distance, direction);
+
+}
+
+
+// ============================================
+// MAIN LOOP
+// ============================================
+
+void loop() {
+
+
+  // ==========================================
+  // KEEP MQTT ALIVE (non-blocking, best effort)
+  // ==========================================
+  //
+  // Reconnects and pumps the MQTT client without blocking the
+  // radar scan. Returns immediately when disconnected.
+
+  maintainMqtt();
+
+
+  // ==========================================
+  // PUBLISH HEART-RATE READING (MQTT, best effort)
+  // ==========================================
+
+  publishHeartReading();
+
+
+  // ==========================================
+  // LEFT TO RIGHT SCAN
+  // ==========================================
+
+  for (int angle = 20; angle <= 160; angle += 20) {
+
+    processReading(angle);
+
+  }
+
+
+  // ==========================================
+  // RIGHT TO LEFT SCAN
+  // ==========================================
+
+  for (int angle = 160; angle >= 20; angle -= 20) {
+
+    processReading(angle);
+
+  }
+
+}

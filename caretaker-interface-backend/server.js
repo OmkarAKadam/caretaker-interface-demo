@@ -1,8 +1,12 @@
 const express = require('express');
 const cors = require('cors');
+const { createMqttClient } = require('./mqtt/client');
+const { TOPICS } = require('./mqtt/topics');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
+
+const mqttClient = createMqttClient(handleMqttMessage);
 
 if (process.env.CORS_ORIGIN) {
     app.use(cors({ origin: process.env.CORS_ORIGIN.split(',').map((o) => o.trim()) }));
@@ -13,6 +17,16 @@ app.use(express.json());
 
 const events = new Map();
 let latestLocation = null;
+let latestDeviceStatus = null;
+let latestFall = null;
+let latestBuzzerState = null;
+let lastHeartRate = null;
+let mqttSeq = 0;
+
+const HEART_RATE_COOLDOWN_MS = 30000;
+const HEART_RATE_ALERT_LOW = 60;
+const HEART_RATE_ALERT_HIGH = 100;
+const lastHeartRateAlertAt = {};
 const sseClients = new Set();
 
 const VALID_TRIGGERS = ['SOS', 'HEART_RATE', 'SOS_AND_HEART_RATE', 'NORMAL', 'OBSTACLE_LEFT', 'OBSTACLE_CENTER', 'OBSTACLE_RIGHT'];
@@ -104,8 +118,309 @@ function validateEvent(event) {
     return null;
 }
 
+function storeLocation(location) {
+    const error = validateLocation(location);
+    if (error) {
+        return { ok: false, status: 400, error };
+    }
+
+    const stored = {
+        latitude: location.latitude,
+        longitude: location.longitude,
+        timestamp: location.timestamp || new Date().toISOString()
+    };
+    latestLocation = stored;
+    return { ok: true, location: stored };
+}
+
+function nextMqttAlertId(trigger) {
+    mqttSeq += 1;
+    return `MQTT-${trigger}-${String(mqttSeq).padStart(4, '0')}`;
+}
+
+function createEvent(event, options) {
+    const opts = options || {};
+
+    const error = validateEvent(event);
+    if (error) {
+        return { ok: false, status: 400, error };
+    }
+
+    if (events.has(event.alertId)) {
+        return { ok: false, status: 409, error: 'Event with this alertId already exists' };
+    }
+
+    if (event.latitude === undefined || event.latitude === null ||
+        event.longitude === undefined || event.longitude === null) {
+        if (latestLocation && isValidLatitude(latestLocation.latitude) && isValidLongitude(latestLocation.longitude)) {
+            event.latitude = latestLocation.latitude;
+            event.longitude = latestLocation.longitude;
+        } else if (!opts.allowMissingCoordinates) {
+            return { ok: false, status: 400, error: 'Location unavailable — provide coordinates or post phone GPS first' };
+        }
+    }
+
+    events.set(event.alertId, event);
+    broadcastEvent(event);
+    return { ok: true, status: 201, event };
+}
+
+const RADAR_DIRECTION_MAP = {
+    LEFT: 'OBSTACLE_LEFT',
+    CENTER: 'OBSTACLE_CENTER',
+    RIGHT: 'OBSTACLE_RIGHT'
+};
+
+function handleRadarMessage(payload) {
+    const direction = payload && payload.direction;
+    const trigger = RADAR_DIRECTION_MAP[direction];
+    const hasDistance =
+        payload && typeof payload.distance === 'number' && Number.isFinite(payload.distance) && payload.distance >= 0;
+
+    if (!trigger || !hasDistance) {
+        console.warn(`[MQTT] Invalid radar payload — direction="${String(direction)}", distance=${payload ? payload.distance : 'missing'}`);
+        return;
+    }
+
+    const event = {
+        alertId: nextMqttAlertId(trigger),
+        trigger,
+        status: 'ACTIVE',
+        heartRate: null,
+        latitude: null,
+        longitude: null,
+        timestamp: isValidTimestamp(payload.timestamp) ? payload.timestamp : new Date().toISOString(),
+        source: 'mqtt',
+        deviceId: payload.deviceId,
+        distance: payload.distance,
+        angle: Number.isFinite(payload.angle) ? payload.angle : null,
+        danger: payload.danger
+    };
+
+    const result = createEvent(event, { allowMissingCoordinates: true });
+    if (result.ok) {
+        console.log(`[MQTT] Radar event → ${trigger} (alertId ${result.event.alertId})`);
+    } else {
+        console.warn(`[MQTT] Radar event skipped: ${result.error}`);
+    }
+}
+
+function handleSosMessage(payload) {
+    const hasDeviceId = payload && typeof payload.deviceId === 'string' && payload.deviceId.trim() !== '';
+    const hasMessage = payload && typeof payload.message === 'string' && payload.message.trim() !== '';
+
+    if (!payload || !(hasDeviceId || hasMessage)) {
+        console.warn('[MQTT] Invalid SOS payload');
+        return;
+    }
+
+    const event = {
+        alertId: nextMqttAlertId('SOS'),
+        trigger: 'SOS',
+        status: 'ACTIVE',
+        heartRate: null,
+        latitude: null,
+        longitude: null,
+        timestamp: isValidTimestamp(payload.timestamp) ? payload.timestamp : new Date().toISOString(),
+        source: 'mqtt',
+        deviceId: payload.deviceId,
+        message: payload.message
+    };
+
+    const result = createEvent(event, { allowMissingCoordinates: true });
+    if (result.ok) {
+        console.log(`[MQTT] SOS event received (alertId ${result.event.alertId})`);
+    } else {
+        console.warn(`[MQTT] SOS event skipped: ${result.error}`);
+    }
+}
+
+function handleLocationMessage(payload) {
+    const result = storeLocation(payload);
+    if (result.ok) {
+        console.log('[MQTT] Location update received');
+    } else {
+        console.warn(`[MQTT] Invalid location payload: ${result.error}`);
+    }
+}
+
+function handleDeviceStatusMessage(payload) {
+    const hasDeviceId = payload && typeof payload.deviceId === 'string' && payload.deviceId.trim() !== '';
+    const hasStatus = payload && typeof payload.status === 'string' && payload.status.trim() !== '';
+
+    if (!payload || !(hasDeviceId || hasStatus)) {
+        console.warn('[MQTT] Invalid device status payload');
+        return;
+    }
+
+    latestDeviceStatus = {
+        deviceId: payload.deviceId,
+        status: payload.status,
+        wifi: payload.wifi,
+        receivedAt: new Date().toISOString()
+    };
+    console.log('[MQTT] Device status update received');
+}
+
+function handleFallMessage(payload) {
+    const hasDeviceId = payload && typeof payload.deviceId === 'string' && payload.deviceId.trim() !== '';
+
+    if (!payload || !hasDeviceId) {
+        console.warn('[MQTT] Invalid fall payload');
+        return;
+    }
+
+    latestFall = {
+        deviceId: payload.deviceId,
+        timestamp: isValidTimestamp(payload.timestamp) ? payload.timestamp : new Date().toISOString(),
+        latitude: latestLocation ? latestLocation.latitude : null,
+        longitude: latestLocation ? latestLocation.longitude : null,
+        receivedAt: new Date().toISOString()
+    };
+    console.warn('[MQTT] Fall event received — no dedicated trigger in the event model; stored in memory (not broadcast)');
+}
+
+function handleAlertsMessage(payload) {
+    if (!payload || typeof payload.trigger !== 'string') {
+        console.warn('[MQTT] Invalid alerts payload (no trigger) — logged only');
+        return;
+    }
+
+    if (!VALID_TRIGGERS.includes(payload.trigger)) {
+        console.warn(`[MQTT] Alert received with unsupported trigger "${payload.trigger}" — logged only`);
+        return;
+    }
+
+    const event = {
+        alertId: nextMqttAlertId(payload.trigger),
+        trigger: payload.trigger,
+        status: VALID_STATUSES.includes(payload.status) ? payload.status : 'ACTIVE',
+        heartRate: typeof payload.heartRate === 'number' && Number.isFinite(payload.heartRate) ? payload.heartRate : null,
+        latitude: typeof payload.latitude === 'number' && Number.isFinite(payload.latitude) ? payload.latitude : null,
+        longitude: typeof payload.longitude === 'number' && Number.isFinite(payload.longitude) ? payload.longitude : null,
+        timestamp: isValidTimestamp(payload.timestamp) ? payload.timestamp : new Date().toISOString(),
+        source: 'mqtt',
+        deviceId: payload.deviceId,
+        message: payload.message
+    };
+
+    const result = createEvent(event, { allowMissingCoordinates: true });
+    if (result.ok) {
+        console.log(`[MQTT] Alert routed → ${payload.trigger} (alertId ${result.event.alertId})`);
+    } else {
+        console.warn(`[MQTT] Alert skipped: ${result.error}`);
+    }
+}
+
+function handleHeartRateMessage(payload) {
+    const raw = payload && payload.heartRate;
+    const hasValidHeartRate =
+        typeof raw === 'number' && Number.isFinite(raw) && raw > 0 && raw <= 400;
+
+    if (!payload || !hasValidHeartRate) {
+        console.warn(`[MQTT] Invalid heart-rate payload — heartRate="${String(raw)}".`);
+        return;
+    }
+
+    const deviceId =
+        payload && typeof payload.deviceId === 'string' && payload.deviceId.trim() !== ''
+            ? payload.deviceId
+            : 'unknown';
+
+    lastHeartRate = {
+        deviceId,
+        heartRate: raw,
+        timestamp: isValidTimestamp(payload.timestamp) ? payload.timestamp : new Date().toISOString(),
+        receivedAt: new Date().toISOString()
+    };
+
+    const abnormal = raw < HEART_RATE_ALERT_LOW || raw > HEART_RATE_ALERT_HIGH;
+
+    if (!abnormal) {
+        console.log(`[MQTT] Heart-rate update received (normal): ${raw} BPM. No alert.`);
+        return;
+    }
+
+    const now = Date.now();
+    const lastAlertAt = lastHeartRateAlertAt[deviceId] || 0;
+
+    if (now - lastAlertAt < HEART_RATE_COOLDOWN_MS) {
+        console.log(`[MQTT] Abnormal heart-rate (${raw} BPM) within cooldown — no new event for ${deviceId}.`);
+        return;
+    }
+
+    const event = {
+        alertId: nextMqttAlertId('HEART_RATE'),
+        trigger: 'HEART_RATE',
+        status: 'ACTIVE',
+        heartRate: raw,
+        latitude: null,
+        longitude: null,
+        timestamp: lastHeartRate.timestamp,
+        source: 'mqtt',
+        deviceId
+    };
+
+    const result = createEvent(event, { allowMissingCoordinates: true });
+
+    if (result.ok) {
+        lastHeartRateAlertAt[deviceId] = now;
+        console.log(`[MQTT] HEART_RATE event created (${raw} BPM, alertId ${result.event.alertId}).`);
+    } else {
+        console.warn(`[MQTT] HEART_RATE event skipped: ${result.error}`);
+    }
+}
+
+function handleMqttMessage(topic, payload) {
+    switch (topic) {
+        case TOPICS.SENSOR_RADAR:
+            handleRadarMessage(payload);
+            break;
+        case TOPICS.EMERGENCY_SOS:
+            handleSosMessage(payload);
+            break;
+        case TOPICS.MOBILE_LOCATION:
+            handleLocationMessage(payload);
+            break;
+        case TOPICS.DEVICE_STATUS:
+            handleDeviceStatusMessage(payload);
+            break;
+        case TOPICS.MOBILE_FALL:
+            handleFallMessage(payload);
+            break;
+        case TOPICS.ALERTS:
+            handleAlertsMessage(payload);
+            break;
+        case TOPICS.SENSOR_HEART:
+            handleHeartRateMessage(payload);
+            break;
+        default:
+            console.log(`[MQTT] Message received (unhandled topic: ${topic})`);
+    }
+}
+
+const BUZZER_COMMANDS = Object.freeze({
+    BUZZER_ON: 'BUZZER_ON',
+    BUZZER_OFF: 'BUZZER_OFF'
+});
+
+function publishBuzzerCommand(command) {
+    const published = mqttClient.publish(TOPICS.DEVICE_COMMAND, {
+        command,
+        issuedAt: new Date().toISOString()
+    });
+    if (published) {
+        latestBuzzerState = command === BUZZER_COMMANDS.BUZZER_ON ? 'ON' : 'OFF';
+    }
+    return published;
+}
+
 app.get('/api/health', (req, res) => {
-    res.status(200).json({ status: 'ok' });
+    res.status(200).json({
+        status: 'ok',
+        mqtt: mqttClient.getState(),
+        deviceStatus: latestDeviceStatus
+    });
 });
 
 app.get('/api/events', (req, res) => {
@@ -120,47 +435,23 @@ app.get('/api/location', (req, res) => {
 });
 
 app.post('/api/location', (req, res) => {
-    const location = req.body;
+    const result = storeLocation(req.body);
 
-    const error = validateLocation(location);
-    if (error) {
-        return res.status(400).json({ error });
+    if (!result.ok) {
+        return res.status(400).json({ error: result.error });
     }
 
-    latestLocation = {
-        latitude: location.latitude,
-        longitude: location.longitude,
-        timestamp: location.timestamp || new Date().toISOString()
-    };
-
-    return res.status(200).json(latestLocation);
+    return res.status(200).json(result.location);
 });
 
 app.post('/api/events', (req, res) => {
-    const event = req.body;
+    const result = createEvent(req.body);
 
-    const error = validateEvent(event);
-    if (error) {
-        return res.status(400).json({ error });
+    if (!result.ok) {
+        return res.status(result.status).json({ error: result.error });
     }
 
-    if (events.has(event.alertId)) {
-        return res.status(409).json({ error: 'Event with this alertId already exists' });
-    }
-
-    if (event.latitude === undefined || event.latitude === null ||
-        event.longitude === undefined || event.longitude === null) {
-        if (latestLocation && isValidLatitude(latestLocation.latitude) && isValidLongitude(latestLocation.longitude)) {
-            event.latitude = latestLocation.latitude;
-            event.longitude = latestLocation.longitude;
-        } else {
-            return res.status(400).json({ error: 'Location unavailable — provide coordinates or post phone GPS first' });
-        }
-    }
-
-    events.set(event.alertId, event);
-    broadcastEvent(event);
-    return res.status(201).json(event);
+    return res.status(result.status).json(result.event);
 });
 
 app.patch('/api/events/:alertId', (req, res) => {
@@ -190,6 +481,41 @@ app.patch('/api/events/:alertId', (req, res) => {
     return res.status(200).json(event);
 });
 
+app.post('/api/buzzer', (req, res) => {
+    const command = req.body && req.body.command;
+    const state = req.body && req.body.state;
+
+    if (!BUZZER_COMMANDS[command]) {
+        return res.status(400).json({ error: 'Invalid command — use "BUZZER_ON" or "BUZZER_OFF"' });
+    }
+
+    if (!mqttClient.client || mqttClient.getState() !== 'connected') {
+        return res.status(503).json({
+            error: 'MQTT command channel unavailable — buzzer command not sent to the device.',
+            mqtt: mqttClient.getState()
+        });
+    }
+
+    const published = publishBuzzerCommand(command);
+    if (!published) {
+        return res.status(503).json({ error: 'Buzzer command not sent — MQTT publish failed.' });
+    }
+
+    return res.status(200).json({
+        command,
+        state: state || (command === BUZZER_COMMANDS.BUZZER_ON ? 'ON' : 'OFF'),
+        published: true
+    });
+});
+
+app.get('/api/buzzer', (req, res) => {
+    return res.status(200).json({
+        state: latestBuzzerState,
+        commandTopic: TOPICS.DEVICE_COMMAND,
+        mqtt: mqttClient.getState()
+    });
+});
+
 app.get('/api/events/stream', (req, res) => {
     res.set({
         'Content-Type': 'text/event-stream',
@@ -210,6 +536,20 @@ app.use((req, res) => {
     res.status(404).json({ error: 'Route not found' });
 });
 
-app.listen(PORT, () => {
+const server = app.listen(PORT, () => {
     console.log(`Caretaker backend listening on http://localhost:${PORT}`);
 });
+
+function shutdown(signal) {
+    console.log(`[Server] Received ${signal}, shutting down…`);
+    if (mqttClient.close) {
+        mqttClient.close();
+    }
+    server.close(() => {
+        process.exit(0);
+    });
+    setTimeout(() => process.exit(0), 3000).unref();
+}
+
+process.on('SIGINT', () => shutdown('SIGINT'));
+process.on('SIGTERM', () => shutdown('SIGTERM'));
