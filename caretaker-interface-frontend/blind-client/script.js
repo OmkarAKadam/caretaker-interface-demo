@@ -61,14 +61,15 @@ let walleSessionId = null;
 let walleRetryTimer = null;
 let walleRetryCount = 0;
 
-const CONFIRMATION_YES = new Set(['yes', 'send it', 'confirm', 'send emergency alert', 'send', 'ok', 'okay']);
-const CONFIRMATION_NO = new Set(['no', 'cancel', 'stop', 'no cancel', 'never mind', 'nevermind']);
+const CONFIRMATION_YES = ['yes', 'ok', 'okay', 'send', 'send it', 'send emergency alert', 'confirm', 'go ahead'];
+const CONFIRMATION_NO = ['no', 'cancel', 'stop', "don't send", 'do not send', 'never mind', 'nevermind', 'not now'];
 const WAKE_PHRASES = ['help', 'help me'];
 const SOS_MAX_MESSAGE_LENGTH = 500;
 const BUZZER_ENDPOINT = `${API_BASE_URL}/api/buzzer`;
 
 const EMERGENCY_COMMAND_PHRASES = [
     'emergency',
+    'help',
     'i need emergency assistance',
     'i have fallen',
     'i fell',
@@ -818,6 +819,7 @@ function startRecognition(mode) {
     }
 
     sosRecognition = recognition;
+    let errorRestartScheduled = false;
 
     recognition.onresult = (event) => {
         if (isSpeaking) return;
@@ -850,6 +852,9 @@ function startRecognition(mode) {
         if (sosRecognition === recognition) {
             sosRecognition = null;
         }
+        if (errorRestartScheduled) {
+            return;
+        }
         if (mode === 'passive' && sosState === 'PASSIVE_LISTENING' && handsFreeEnabled) {
             schedulePassiveRestart();
         } else if (mode === 'walle' && walleState === 'ACTIVE') {
@@ -868,6 +873,7 @@ function startRecognition(mode) {
         if (event.error === 'aborted') return;
         console.warn('[Voice SOS] Recognition error:', event.error);
         if (event.error === 'network') {
+            if (errorRestartScheduled) return;
             if (mode === 'passive') {
                 passiveNetworkErrorCount += 1;
                 if (passiveNetworkErrorCount >= PASSIVE_NETWORK_ERROR_LIMIT) {
@@ -879,11 +885,14 @@ function startRecognition(mode) {
                         handsfreeHint.textContent = 'Speech recognition had connection trouble. Toggle hands-free off and on to resume.';
                     }
                 } else {
+                    errorRestartScheduled = true;
                     schedulePassiveRestart();
                 }
             } else if (mode === 'walle') {
+                errorRestartScheduled = true;
                 scheduleWalleRestart();
             } else {
+                errorRestartScheduled = true;
                 scheduleRecognitionRestart(mode);
             }
             return;
@@ -953,7 +962,13 @@ function scheduleRecognitionRestart(mode) {
     if (recognitionRestartCount > 4) {
         recognitionRestartCount = 0;
         if (mode === 'command' || mode === 'capture' || mode === 'confirm') {
-            returnToPassive();
+            speak('I didn\'t hear you. Please try again.', () => {
+                if (sosState === 'COMMAND_LISTENING' ||
+                    sosState === 'LISTENING_FOR_EMERGENCY' ||
+                    sosState === 'CONFIRMING_MESSAGE') {
+                    resetVoiceSos();
+                }
+            });
         }
         return;
     }
@@ -1004,7 +1019,12 @@ function handlePassiveResult(finalTranscript, interimTranscript) {
             /* TEMPORARY DIAGNOSTIC — see note above. */
             console.log('[Voice] Wall-E wake detected: "' + finalTranscript + '"');
             stopRecognition();
-            activateWallE();
+            const question = extractWalleQuestion(finalTranscript);
+            if (question) {
+                activateWallE(question);
+            } else {
+                activateWallE();
+            }
         }
     } else if (finalTranscript && isUnsafeWallEFuzzyCandidate(finalTranscript)) {
         /* TEMPORARY DIAGNOSTIC — see note above. */
@@ -1077,30 +1097,20 @@ function transitionToConfirm() {
 
 function handleConfirmResult(transcript) {
     if (!transcript) return;
-    const lower = transcript.toLowerCase().trim();
-    let confirmed = false;
-    let cancelled = false;
+    const lower = normalizeTranscript(transcript);
+
+    for (const phrase of CONFIRMATION_NO) {
+        if (transcriptContainsPhrase(lower, phrase)) {
+            abortVoiceSos();
+            return;
+        }
+    }
 
     for (const phrase of CONFIRMATION_YES) {
-        if (lower.includes(phrase)) {
-            confirmed = true;
-            break;
+        if (transcriptContainsPhrase(lower, phrase)) {
+            transitionToSend();
+            return;
         }
-    }
-
-    if (!confirmed) {
-        for (const phrase of CONFIRMATION_NO) {
-            if (lower.includes(phrase)) {
-                cancelled = true;
-                break;
-            }
-        }
-    }
-
-    if (confirmed) {
-        transitionToSend();
-    } else if (cancelled) {
-        abortVoiceSos();
     }
 }
 
@@ -1328,6 +1338,70 @@ function isWalleExitPhrase(transcript) {
     return false;
 }
 
+function stripFirstWalleWake(transcript) {
+    const lower = normalizeTranscript(transcript);
+    if (!lower) return '';
+    const words = lower.split(' ');
+
+    let best = null;
+
+    for (const phrase of WALLE_WAKE_PHRASES) {
+        const pWords = normalizeTranscript(phrase).split(' ');
+        if (!pWords.length) continue;
+        for (let i = 0; i + pWords.length <= words.length; i += 1) {
+            let ok = true;
+            for (let j = 0; j < pWords.length; j += 1) {
+                if (words[i + j] !== pWords[j]) {
+                    ok = false;
+                    break;
+                }
+            }
+            if (ok && (!best || i < best.start)) {
+                best = { start: i, end: i + pWords.length };
+            }
+        }
+    }
+
+    if (lower.startsWith('hey ') && words.length > 1) {
+        for (const phrase of WALLE_HEY_ONLY_PHRASES) {
+            const pWords = normalizeTranscript(phrase).split(' ');
+            let ok = pWords.length > 0;
+            for (let j = 0; j < pWords.length; j += 1) {
+                if (words[1 + j] !== pWords[j]) {
+                    ok = false;
+                    break;
+                }
+            }
+            if (ok && (!best || 0 < best.start)) {
+                best = { start: 0, end: 1 + pWords.length };
+            }
+        }
+    }
+
+    if (!best) {
+        return lower;
+    }
+
+    let start = best.start;
+    if (start > 0 && words[start - 1] === 'hey') {
+        start -= 1;
+    }
+
+    return words.slice(0, start).concat(words.slice(best.end)).join(' ').trim();
+}
+
+function extractWalleQuestion(transcript) {
+    let current = normalizeTranscript(transcript);
+    for (let pass = 0; pass < 3 && current; pass += 1) {
+        const stripped = stripFirstWalleWake(current);
+        if (stripped === current) {
+            break;
+        }
+        current = stripped;
+    }
+    return current;
+}
+
 function clearWalleRetryTimer() {
     if (walleRetryTimer !== null) {
         clearTimeout(walleRetryTimer);
@@ -1378,7 +1452,7 @@ function createWalleSessionId() {
     return 'walle-' + Date.now() + '-' + Math.floor(Math.random() * 1000000);
 }
 
-function activateWallE() {
+function activateWallE(initialMessage) {
     clearWalleRetryTimer();
     walleRetryCount = 0;
     walleSessionId = createWalleSessionId();
@@ -1386,6 +1460,10 @@ function activateWallE() {
     stopRecognition();
     sosState = 'IDLE';
     updateHandsfreeUI();
+    if (initialMessage) {
+        handleWalleResult(initialMessage);
+        return;
+    }
     speak('Yes? What do you need?', () => {
         if (walleState === 'ACTIVE') {
             startWalleListening();

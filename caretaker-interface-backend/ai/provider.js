@@ -4,7 +4,9 @@ const NVIDIA_BASE_URL = 'https://integrate.api.nvidia.com/v1/chat/completions';
 
 // Models that support NVIDIA's chat_template_kwargs for disabling thinking
 const THINKING_DISABLED_MODELS = new Set([
-    'nvidia/nemotron-3.5-lightning-30b-a3b'
+    'nvidia/nemotron-3.5-lightning-30b-a3b',
+    'nvidia/nemotron-3-super-120b-a12b',
+    'deepseek-ai/deepseek-v4-flash-0731'
 ]);
 
 function getApiKey() {
