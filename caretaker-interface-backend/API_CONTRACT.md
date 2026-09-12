@@ -421,3 +421,160 @@ Obstacle events are normal alert events: the ESP32 `POST`s them to `/api/events`
 broadcasts them over the SSE stream, and the voice client (phone) turns them into spoken
 alerts. Ground-hazard events (curb / step detection) are **not yet defined**; if they must
 surface as events, add triggers to the validator and document them here.
+
+---
+
+## Wall-E AI chat endpoint
+
+The mobile voice client sends user speech to the backend for AI-powered conversational
+responses. The AI runs server-side via NVIDIA NIM; **no API key is exposed to the browser**.
+
+| Method | Path              | Purpose                          |
+|--------|-------------------|----------------------------------|
+| POST   | `/api/walle/chat` | Send a user message, get an AI reply |
+
+### POST /api/walle/chat
+
+```http
+POST /api/walle/chat
+Content-Type: application/json
+
+{
+  "sessionId": "blind-session-001",
+  "message": "What can you help me with?"
+}
+```
+
+| Field       | Type   | Required | Notes                                                        |
+|-------------|--------|----------|--------------------------------------------------------------|
+| `sessionId` | string | yes      | Identifies the conversation session. Non-empty.              |
+| `message`   | string | yes      | User's spoken message. Non-empty. Max 1000 characters (configurable via `WALLE_MAX_MESSAGE_LENGTH`). |
+
+#### Response — `200 OK`
+
+```json
+{
+  "sessionId": "blind-session-001",
+  "reply": "I can help with directions, answer questions, and give weather updates. Just ask.",
+  "timestamp": "2026-09-10T12:00:00.000Z",
+  "model": "nvidia/nemotron-3.5-lightning-30b-a3b"
+}
+```
+
+| Field       | Type   | Description                                          |
+|-------------|--------|------------------------------------------------------|
+| `sessionId` | string | Echoed back from the request.                        |
+| `reply`     | string | AI-generated response, optimised for text-to-speech. |
+| `timestamp` | string | ISO-8601 timestamp of when the response was generated.|
+| `model`     | string | The model that produced the response.                |
+
+#### Error responses
+
+| Code | Meaning                  | Body example                                                |
+|------|--------------------------|-------------------------------------------------------------|
+| 400  | Missing/empty `sessionId` or `message`, or message too long | `{ "error": "message is required" }` |
+| 503  | All AI models failed     | `{ "error": "AI_PROVIDER_UNAVAILABLE", "message": "AI service temporarily unavailable" }` |
+| 500  | Unexpected server error  | `{ "error": "Internal server error" }`                      |
+
+### Wall-E conversation history (read-only, caretaker view)
+
+Conversation history is exposed read-only for future caretaker UI use. It is **in-memory
+only**: no database, no files. Conversations are **cleared when the backend restarts**, and
+only sessions still retained within the configured TTL (`WALLE_SESSION_TTL_MS`, default 24h),
+session cap (`WALLE_MAX_SESSIONS`), and per-session turn cap (`WALLE_SESSION_MAX_TURNS`) are
+available.
+
+| Method | Path                          | Purpose                                    |
+|--------|-------------------------------|--------------------------------------------|
+| GET    | `/api/walle/sessions`         | List retained Wall-E conversation sessions |
+| GET    | `/api/walle/history/:sessionId` | Retrieve the transcript for one session  |
+
+#### GET /api/walle/sessions
+
+Returns a JSON array of session summaries, newest/most-recently-active first. Sensor or
+trusted-context data is **never** included.
+
+```http
+GET /api/walle/sessions
+```
+
+Response — `200 OK`:
+
+```json
+[
+  {
+    "sessionId": "blind-session-001",
+    "startedAt": "2026-09-10T11:58:00.000Z",
+    "lastActiveAt": "2026-09-10T12:02:00.000Z",
+    "turnCount": 4,
+    "preview": "Am I near the bus stop?"
+  }
+]
+```
+
+| Field          | Type   | Description                                                    |
+|----------------|--------|----------------------------------------------------------------|
+| `sessionId`    | string | Identifier of the conversation session.                        |
+| `startedAt`    | string | ISO-8601 time the session was created.                         |
+| `lastActiveAt` | string | ISO-8601 time of the most recent turn.                         |
+| `turnCount`    | number | Number of retained turns in the session.                       |
+| `preview`      | string | Short preview of the conversation (most recent user message, truncated to 100 chars). |
+
+#### GET /api/walle/history/:sessionId
+
+Returns the retained transcript for one session. The session must exist and be within its
+TTL; otherwise `404`. Requesting history **never creates** a session.
+
+```http
+GET /api/walle/history/blind-session-001
+```
+
+#### Response — `200 OK`
+
+```json
+{
+  "sessionId": "blind-session-001",
+  "startedAt": "2026-09-10T11:58:00.000Z",
+  "lastActiveAt": "2026-09-10T12:02:00.000Z",
+  "turns": [
+    { "role": "user", "text": "Am I near the bus stop?", "timestamp": "2026-09-10T11:58:00.000Z" },
+    { "role": "assistant", "text": "Yes, about 40m ahead on the right.", "timestamp": "2026-09-10T11:58:05.000Z", "model": "nvidia/nemotron-3.5-lightning-30b-a3b" }
+  ]
+}
+```
+
+| Field          | Type                              | Description                                                    |
+|----------------|-----------------------------------|----------------------------------------------------------------|
+| `sessionId`    | string                            | Identifier of the conversation session.                        |
+| `startedAt`    | string                            | ISO-8601 time the session was created.                         |
+| `lastActiveAt` | string                            | ISO-8601 time of the most recent turn.                         |
+| `turns`        | array of turn objects             | Retained turns in chronological order.                         |
+| `turns[].role` | `"user"` \| `"assistant"`         | Speaker of the turn.                                           |
+| `turns[].text` | string                            | Turn text.                                                     |
+| `turns[].timestamp` | string                       | ISO-8601 time of the turn.                                     |
+| `turns[].model` | string (assistant only)          | Model that produced the reply; absent when unknown.            |
+
+#### Error responses
+
+| Code | Meaning                                                    | Body example                       |
+|------|------------------------------------------------------------|------------------------------------|
+| 404  | Session does not exist, is expired, or is not retained     | `{ "error": "Session not found" }` |
+
+#### Architecture
+
+```
+Blind Client (browser)
+      │  POST /api/walle/chat
+      ▼
+   Backend  ──►  system prompt + user message
+      │
+      ▼
+   NVIDIA NIM (primary → fallback 1 → fallback 2)
+      │
+      ▼
+   { sessionId, reply, timestamp, model }  ──►  TTS via Web Speech API
+```
+
+The backend owns the system prompt and trusted context (future step). The browser never
+holds an AI API key. The `sessionId` is for future per-session conversation history and
+caretaker-viewable conversation logs.

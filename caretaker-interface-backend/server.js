@@ -2,17 +2,36 @@ const express = require('express');
 const cors = require('cors');
 const { createMqttClient } = require('./mqtt/client');
 const { TOPICS } = require('./mqtt/topics');
+const { getSystemPrompt } = require('./ai/system-prompt');
+const { chatWithFallback } = require('./ai/model-router');
+const { buildTrustedContext } = require('./ai/context-builder');
+const conversationStore = require('./ai/conversation-store');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
 
 const mqttClient = createMqttClient(handleMqttMessage);
 
-if (process.env.CORS_ORIGIN) {
-    app.use(cors({ origin: process.env.CORS_ORIGIN.split(',').map((o) => o.trim()) }));
-} else {
-    app.use(cors());
+const DEFAULT_ALLOWED_ORIGINS = ['http://localhost:5500', 'http://127.0.0.1:5500'];
+
+function getAllowedOrigins() {
+    const fromEnv = process.env.CORS_ORIGIN;
+    if (fromEnv) {
+        return fromEnv.split(',').map((o) => o.trim()).filter(Boolean);
+    }
+    return DEFAULT_ALLOWED_ORIGINS;
 }
+
+const allowedOrigins = getAllowedOrigins();
+
+app.use(cors({
+    origin(origin, callback) {
+        if (!origin) return callback(null, true);
+        if (allowedOrigins.includes(origin)) return callback(null, true);
+        return callback(null, false);
+    },
+    credentials: false
+}));
 app.use(express.json());
 
 const events = new Map();
@@ -53,6 +72,16 @@ function isValidLongitude(value) {
 
 function isValidTimestamp(value) {
     return typeof value === 'string' && value.trim() !== '' && !Number.isNaN(Date.parse(value));
+}
+
+const WALLE_SESSION_ID_PATTERN = /^[A-Za-z0-9-]+$/;
+const WALLE_SESSION_ID_MAX_LENGTH = 128;
+
+function isValidWalleSessionId(value) {
+    return typeof value === 'string' &&
+        value.length > 0 &&
+        value.length <= WALLE_SESSION_ID_MAX_LENGTH &&
+        WALLE_SESSION_ID_PATTERN.test(value);
 }
 
 function broadcastEvent(event) {
@@ -532,8 +561,145 @@ app.get('/api/events/stream', (req, res) => {
     });
 });
 
+const WALLE_CHAT_RATE_MAX = 30;
+const WALLE_CHAT_RATE_WINDOW_MS = 60 * 1000;
+const WALLE_CHAT_RATE_CLEANUP_THRESHOLD = 500;
+const walleChatRateBuckets = new Map();
+let walleChatRateCallsSinceCleanup = 0;
+
+function isWalleChatRateLimited(req) {
+    const ip = req.ip || 'unknown';
+    const now = Date.now();
+    let bucket = walleChatRateBuckets.get(ip);
+    if (!bucket || bucket.windowStart + WALLE_CHAT_RATE_WINDOW_MS <= now) {
+        bucket = { windowStart: now, count: 0 };
+        walleChatRateBuckets.set(ip, bucket);
+    }
+    bucket.count += 1;
+
+    walleChatRateCallsSinceCleanup += 1;
+    if (walleChatRateCallsSinceCleanup >= WALLE_CHAT_RATE_CLEANUP_THRESHOLD) {
+        walleChatRateCallsSinceCleanup = 0;
+        const cutoff = now - WALLE_CHAT_RATE_WINDOW_MS;
+        for (const [key, entry] of walleChatRateBuckets) {
+            if (entry.windowStart + WALLE_CHAT_RATE_WINDOW_MS <= cutoff) {
+                walleChatRateBuckets.delete(key);
+            }
+        }
+    }
+
+    return bucket.count > WALLE_CHAT_RATE_MAX;
+}
+
+const WALLE_MAX_MESSAGE_LENGTH = (() => {
+    const raw = parseInt(process.env.WALLE_MAX_MESSAGE_LENGTH, 10);
+    return Number.isFinite(raw) && raw > 0 ? raw : 1000;
+})();
+
+app.post('/api/walle/chat', async (req, res) => {
+    if (isWalleChatRateLimited(req)) {
+        return res.status(429).json({ error: 'Too many requests. Please try again shortly.' });
+    }
+
+    const { sessionId, message } = req.body || {};
+
+    if (typeof sessionId !== 'string' || sessionId.trim() === '') {
+        return res.status(400).json({ error: 'sessionId is required' });
+    }
+
+    if (!isValidWalleSessionId(sessionId)) {
+        return res.status(400).json({ error: 'Invalid sessionId' });
+    }
+
+    if (typeof message !== 'string' || message.trim() === '') {
+        return res.status(400).json({ error: 'message is required' });
+    }
+
+    if (message.length > WALLE_MAX_MESSAGE_LENGTH) {
+        return res.status(400).json({
+            error: `message exceeds maximum length of ${WALLE_MAX_MESSAGE_LENGTH} characters`
+        });
+    }
+
+    const contextSnapshot = buildTrustedContext({
+        latestLocation,
+        latestDeviceStatus,
+        lastHeartRate,
+        latestFall,
+        latestBuzzerState,
+        events
+    });
+
+    conversationStore.addUserMessage(sessionId, message.trim());
+
+    const history = conversationStore.buildModelMessages(sessionId);
+
+    const messages = [
+        { role: 'system', content: getSystemPrompt() },
+        { role: 'system', content: contextSnapshot },
+        ...history
+    ];
+
+    try {
+        const result = await chatWithFallback({
+            messages,
+            temperature: 0.2,
+            maxTokens: 200
+        });
+        conversationStore.addAssistantMessage(sessionId, result.reply, result.model);
+        return res.status(200).json({
+            sessionId,
+            reply: result.reply,
+            timestamp: new Date().toISOString(),
+            model: result.model
+        });
+    } catch (err) {
+        if (err.message === 'AI_PROVIDER_UNAVAILABLE') {
+            return res.status(503).json({
+                error: 'AI_PROVIDER_UNAVAILABLE',
+                message: 'AI service temporarily unavailable'
+            });
+        }
+        console.error('[Wall-E] unexpected chat error:', err);
+        return res.status(500).json({ error: 'Internal server error' });
+    }
+});
+
+app.get('/api/walle/sessions', (req, res) => {
+    return res.status(200).json(conversationStore.getSessionSummaries());
+});
+
+app.get('/api/walle/history/:sessionId', (req, res) => {
+    const sessionId = req.params.sessionId;
+    if (!isValidWalleSessionId(sessionId)) {
+        return res.status(404).json({ error: 'Session not found' });
+    }
+    const transcript = conversationStore.getSessionTranscript(sessionId);
+    if (!transcript) {
+        return res.status(404).json({ error: 'Session not found' });
+    }
+    return res.status(200).json(transcript);
+});
+
 app.use((req, res) => {
     res.status(404).json({ error: 'Route not found' });
+});
+
+app.use((err, req, res, next) => {
+    if (res.headersSent) {
+        return next(err);
+    }
+
+    if (err && err.type === 'entity.parse.failed') {
+        return res.status(400).json({ error: 'Malformed JSON request' });
+    }
+
+    if (err && err.type === 'entity.too.large') {
+        return res.status(413).json({ error: 'Request entity too large' });
+    }
+
+    console.error('[Server] Unhandled error:', err && err.message ? err.message : err);
+    return res.status(500).json({ error: 'Internal server error' });
 });
 
 const server = app.listen(PORT, () => {

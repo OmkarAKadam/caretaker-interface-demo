@@ -1048,6 +1048,7 @@ async function apiPollLoop(epoch) {
         const events = await fetchEventsFromAPI();
         setApiStatus('connected');
         await receiveEventFromAPI(events);
+        await loadWalleSessions();
     } catch (error) {
         if (apiStatus !== 'offline') {
             console.warn('[API] Polling failed:', error.message || error);
@@ -1086,6 +1087,299 @@ function toggleApiPolling() {
     } else {
         startApiPolling();
     }
+}
+
+/* ── Wall-E Conversations ─────────────────────────────────── */
+
+const WALLE_SESSIONS_ENDPOINT = `${API_BASE_URL}/api/walle/sessions`;
+
+let walleSessions = [];
+let walleSessionsSignature = '';
+let selectedWalleSessionId = null;
+
+function walleSessionSignature(sessions) {
+    return sessions
+        .map((s) => [s.sessionId, s.lastActiveAt, s.turnCount, s.preview].join('|'))
+        .join('\n');
+}
+
+function setWalleListState(text, subtext) {
+    const stateEl = document.getElementById('walleListState');
+    if (!stateEl) return;
+    const b = stateEl.querySelector('b');
+    const span = stateEl.querySelector('span');
+    if (b) b.textContent = text;
+    if (span) span.textContent = subtext;
+    stateEl.classList.add('visible');
+}
+
+function hideWalleListState() {
+    const stateEl = document.getElementById('walleListState');
+    if (stateEl) stateEl.classList.remove('visible');
+}
+
+async function loadWalleSessions() {
+    if (walleSessions.length === 0) {
+        setWalleListState('Loading conversations…', 'Fetching recent Wall-E conversations.');
+    }
+    try {
+        const response = await fetch(WALLE_SESSIONS_ENDPOINT, { headers: { 'Accept': 'application/json' } });
+        if (!response.ok) {
+            throw new Error(`HTTP ${response.status}`);
+        }
+        const data = await response.json();
+        const sessions = Array.isArray(data) ? data : [];
+        walleSessions = sessions;
+        const signature = walleSessionSignature(sessions);
+        if (signature !== walleSessionsSignature) {
+            walleSessionsSignature = signature;
+            renderWalleSessions();
+        } else {
+            updateWalleCount();
+            highlightWalleSelection();
+        }
+    } catch (error) {
+        if (walleSessions.length === 0) {
+            walleSessionsSignature = '';
+            setWalleListState('Couldn\u2019t load conversations', 'Check the backend connection and try again.');
+        } else {
+            hideWalleListState();
+        }
+        console.warn('[Wall-E] Failed to load session list:', error.message || error);
+    }
+}
+
+function renderWalleSessions() {
+    const list = document.getElementById('walleSessionList');
+    if (!list) return;
+    list.innerHTML = '';
+    updateWalleCount();
+
+    if (walleSessions.length === 0) {
+        setWalleListState('No Wall-E conversations yet', 'Wall-E voice conversations with the blind user will appear here.');
+        selectedWalleSessionId = null;
+        showWalleDetailEmpty();
+        return;
+    }
+
+    hideWalleListState();
+
+    for (const session of walleSessions) {
+        list.appendChild(createWalleSessionRow(session));
+    }
+
+    if (selectedWalleSessionId && !walleSessions.some((s) => s.sessionId === selectedWalleSessionId)) {
+        selectedWalleSessionId = null;
+        showWalleDetailEmpty();
+    }
+
+    highlightWalleSelection();
+}
+
+function createWalleSessionRow(session) {
+    const id = String(session.sessionId || '');
+    const preview = (typeof session.preview === 'string' && session.preview !== '') ? session.preview : 'No messages yet';
+    const startedAt = session.startedAt || '';
+    const lastActiveAt = session.lastActiveAt || '';
+    const turnCount = typeof session.turnCount === 'number' ? session.turnCount : 0;
+
+    const row = document.createElement('div');
+    row.className = 'walle-session-item';
+    row.dataset.sessionId = id;
+
+    const rail = document.createElement('div');
+    rail.className = 'walle-session-rail';
+    const dot = document.createElement('span');
+    dot.className = 'history-dot';
+    rail.appendChild(dot);
+
+    const main = document.createElement('div');
+    main.className = 'walle-session-main';
+
+    const headline = document.createElement('div');
+    headline.className = 'walle-session-headline';
+    const title = document.createElement('span');
+    title.className = 'walle-session-title';
+    title.textContent = 'Conversation';
+    const idEl = document.createElement('span');
+    idEl.className = 'walle-session-id';
+    idEl.textContent = id;
+    headline.appendChild(title);
+    headline.appendChild(idEl);
+
+    const meta = document.createElement('div');
+    meta.className = 'walle-session-meta';
+    const started = document.createElement('span');
+    started.className = 'history-time';
+    started.textContent = startedAt ? `Started ${formatDateTime(startedAt)}` : 'Started —';
+    const sep = document.createElement('span');
+    sep.className = 'history-meta-sep';
+    sep.textContent = '·';
+    const active = document.createElement('span');
+    active.className = 'history-time';
+    active.textContent = lastActiveAt ? `Active ${formatTime(lastActiveAt)}` : 'Active —';
+    meta.appendChild(started);
+    meta.appendChild(sep);
+    meta.appendChild(active);
+
+    const previewEl = document.createElement('div');
+    previewEl.className = 'walle-session-preview';
+    previewEl.textContent = preview;
+
+    main.appendChild(headline);
+    main.appendChild(meta);
+    main.appendChild(previewEl);
+
+    const countEl = document.createElement('span');
+    countEl.className = 'walle-session-count';
+    countEl.textContent = `${turnCount} turn${turnCount === 1 ? '' : 's'}`;
+
+    const chevron = document.createElement('span');
+    chevron.className = 'history-chevron';
+    chevron.innerHTML = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><polyline points="9 6 15 12 9 18"></polyline></svg>';
+
+    row.appendChild(rail);
+    row.appendChild(main);
+    row.appendChild(countEl);
+    row.appendChild(chevron);
+    return row;
+}
+
+function highlightWalleSelection() {
+    document.querySelectorAll('#walleSessionList .walle-session-item').forEach((row) => {
+        row.classList.toggle('selected', row.dataset.sessionId === selectedWalleSessionId);
+    });
+}
+
+function updateWalleCount() {
+    const countEl = document.getElementById('walleCount');
+    if (!countEl) return;
+    const count = walleSessions.length;
+    countEl.textContent = `${count} conversation${count === 1 ? '' : 's'}`;
+}
+
+function showWalleDetailEmpty() {
+    const emptyEl = document.getElementById('walleDetailEmpty');
+    const contentEl = document.getElementById('walleDetailContent');
+    if (emptyEl) emptyEl.style.display = '';
+    if (contentEl) contentEl.hidden = true;
+}
+
+function showWalleDetailState(text, subtext) {
+    const stateEl = document.getElementById('walleDetailState');
+    if (!stateEl) return;
+    const b = stateEl.querySelector('b');
+    const span = stateEl.querySelector('span');
+    if (b) b.textContent = text;
+    if (span) span.textContent = subtext;
+    stateEl.classList.add('visible');
+}
+
+function hideWalleDetailState() {
+    const stateEl = document.getElementById('walleDetailState');
+    if (stateEl) stateEl.classList.remove('visible');
+}
+
+async function selectWalleSession(sessionId) {
+    if (!sessionId) return;
+    selectedWalleSessionId = sessionId;
+    highlightWalleSelection();
+    await loadWalleTranscript(sessionId);
+}
+
+async function loadWalleTranscript(sessionId) {
+    const target = sessionId;
+    const emptyEl = document.getElementById('walleDetailEmpty');
+    const contentEl = document.getElementById('walleDetailContent');
+    const metaEl = document.getElementById('walleDetailMeta');
+    const transcriptEl = document.getElementById('walleTranscript');
+    if (!contentEl || !transcriptEl) return;
+
+    if (emptyEl) emptyEl.style.display = 'none';
+    contentEl.hidden = false;
+    showWalleDetailState('Loading transcript…', 'Fetching this conversation from the backend.');
+
+    try {
+        const response = await fetch(`${API_BASE_URL}/api/walle/history/${encodeURIComponent(sessionId)}`, {
+            headers: { 'Accept': 'application/json' }
+        });
+
+        if (selectedWalleSessionId !== target) return;
+
+        if (response.status === 404) {
+            if (metaEl) metaEl.textContent = '';
+            transcriptEl.innerHTML = '';
+            showWalleDetailState(
+                'This conversation is no longer available',
+                'It expired or was cleared. The session list has been refreshed.'
+            );
+            loadWalleSessions();
+            return;
+        }
+
+        if (!response.ok) {
+            throw new Error(`HTTP ${response.status}`);
+        }
+
+        const data = await response.json();
+        if (selectedWalleSessionId !== target) return;
+
+        if (!data || !Array.isArray(data.turns)) {
+            throw new Error('Unexpected transcript shape');
+        }
+
+        if (metaEl) {
+            const started = data.startedAt ? formatDateTime(data.startedAt) : '—';
+            const active = data.lastActiveAt ? formatTime(data.lastActiveAt) : '—';
+            metaEl.textContent = `Started ${started} · Last active ${active}`;
+        }
+
+        transcriptEl.innerHTML = '';
+        for (const turn of data.turns) {
+            transcriptEl.appendChild(createWalleMsg(turn));
+        }
+        hideWalleDetailState();
+    } catch (error) {
+        if (selectedWalleSessionId !== target) return;
+        showWalleDetailState('Couldn\u2019t load transcript', 'Check the backend connection and try again.');
+        console.warn('[Wall-E] Failed to load transcript:', error.message || error);
+    }
+}
+
+function createWalleMsg(turn) {
+    const isAssistant = turn && turn.role === 'assistant';
+    const text = (turn && typeof turn.text === 'string' && turn.text !== '') ? turn.text : '(empty message)';
+    const time = (turn && turn.timestamp) ? formatTime(turn.timestamp) : '';
+
+    const msg = document.createElement('div');
+    msg.className = `walle-msg ${isAssistant ? 'wall-e' : 'user'}`;
+
+    const head = document.createElement('div');
+    head.className = 'walle-msg-head';
+    const name = document.createElement('span');
+    name.className = 'walle-msg-name';
+    name.textContent = isAssistant ? 'Wall-E' : 'User';
+    const timeEl = document.createElement('span');
+    timeEl.className = 'walle-msg-time';
+    timeEl.textContent = time;
+    head.appendChild(name);
+    head.appendChild(timeEl);
+
+    const body = document.createElement('div');
+    body.className = 'walle-msg-text';
+    body.textContent = text;
+
+    msg.appendChild(head);
+    msg.appendChild(body);
+
+    if (isAssistant && turn.model) {
+        const model = document.createElement('div');
+        model.className = 'walle-msg-model';
+        model.textContent = `via ${turn.model}`;
+        msg.appendChild(model);
+    }
+
+    return msg;
 }
 
 async function fetchLocationFromAPI() {
@@ -1309,6 +1603,15 @@ document.getElementById('alertHistoryList').addEventListener('click', (event) =>
     }
 });
 
+const walleSessionListEl = document.getElementById('walleSessionList');
+if (walleSessionListEl) {
+    walleSessionListEl.addEventListener('click', (event) => {
+        const row = event.target.closest('.walle-session-item');
+        if (!row) return;
+        selectWalleSession(row.dataset.sessionId);
+    });
+}
+
 document.getElementById('demoPanelToggle').addEventListener('click', () => {
     const panel = document.getElementById('demo');
     const toggle = document.getElementById('demoPanelToggle');
@@ -1418,6 +1721,7 @@ if (ribbonEndEl) ribbonEndEl.textContent = EVENTS_ENDPOINT;
 
 setApiStatus('unknown');
 setLocationStatus('unknown');
+loadWalleSessions();
 initMap(baseLatitude, baseLongitude);
 initializeFromHistory();
 tickClock();

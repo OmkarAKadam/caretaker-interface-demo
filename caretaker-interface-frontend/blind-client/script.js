@@ -50,6 +50,16 @@ let handsFreeEnabled = false;
 let passiveRestartCount = 0;
 let passiveRestartTimer = null;
 let buzzerState = null;
+let isSpeaking = false;
+let recognitionRestartTimer = null;
+let recognitionRestartCount = 0;
+let sosReturnFallbackTimer = null;
+let passiveNetworkErrorCount = 0;
+
+let walleState = 'OFF';
+let walleSessionId = null;
+let walleRetryTimer = null;
+let walleRetryCount = 0;
 
 const CONFIRMATION_YES = new Set(['yes', 'send it', 'confirm', 'send emergency alert', 'send', 'ok', 'okay']);
 const CONFIRMATION_NO = new Set(['no', 'cancel', 'stop', 'no cancel', 'never mind', 'nevermind']);
@@ -70,6 +80,39 @@ const BUZZER_ON_PHRASES = ['buzzer on', 'turn the buzzer on', 'enable buzzer', '
 const BUZZER_OFF_PHRASES = ['buzzer off', 'turn the buzzer off', 'disable buzzer', 'turn buzzer off', 'buzzer off now', 'turn off the buzzer'];
 
 const COMMAND_UNKNOWN_RESPONSE = 'I didn\'t understand. You can say emergency, buzzer on, or buzzer off.';
+
+const WALLE_ENDPOINT = `${API_BASE_URL}/api/walle/chat`;
+const WALLE_AI_TIMEOUT_MS = 15000;
+const WALLE_WAKE_PHRASES = [
+    'wall-e',
+    'wall e',
+    'wally',
+    'wallie'
+];
+const WALLE_HEY_ONLY_PHRASES = [
+    'wali',
+    'wellie',
+    'well e',
+    'volley',
+    'valli',
+    'vali'
+];
+const PASSIVE_NETWORK_ERROR_LIMIT = 3;
+const WALLE_EXIT_PHRASES = [
+    'goodbye wall-e',
+    'goodbye wall e',
+    'goodbye wally',
+    'stop wall-e',
+    'stop wall e',
+    'stop wally',
+    'go to sleep',
+    "that's all",
+    'thats all'
+];
+const WALLE_SERVICE_MSG = 'Sorry, I couldn\'t reach the service. Please try again.';
+const WALLE_UNAVAILABLE_MSG = 'The AI service is temporarily unavailable. Try again shortly.';
+const WALLE_INTERNAL_MSG = 'Something went wrong on my end. Let\'s try again.';
+const WALLE_OFFLINE_MSG = 'You appear to be offline. Try again in a moment.';
 
 const voiceCard = document.getElementById('voiceCard');
 const voiceIcon = document.getElementById('voiceIcon');
@@ -214,14 +257,19 @@ function speak(text, onDone) {
         return;
     }
     window.speechSynthesis.cancel();
+    isSpeaking = true;
     const utterance = new SpeechSynthesisUtterance(text);
     utterance.rate = 1.05;
     utterance.pitch = 1;
     utterance.volume = 1;
-    if (onDone) {
-        utterance.onend = () => onDone();
-        utterance.onerror = () => onDone();
-    }
+    utterance.onend = () => {
+        isSpeaking = false;
+        if (onDone) onDone();
+    };
+    utterance.onerror = () => {
+        isSpeaking = false;
+        if (onDone) onDone();
+    };
     window.speechSynthesis.speak(utterance);
 }
 
@@ -272,6 +320,9 @@ function handleEventData(data) {
     }
     const label = DIRECTION_LABELS[event.trigger] || event.trigger;
     updateLastAlert(phrase, label);
+    if (walleState === 'SPEAKING') {
+        return;
+    }
     speak(phrase);
 }
 
@@ -360,6 +411,7 @@ function enableVoiceAlerts() {
 }
 
 function disableVoiceAlerts() {
+    stopWalle();
     voiceEnabled = false;
     clearReconnectTimer();
     if (connection) {
@@ -383,6 +435,7 @@ function speechRecognitionAvailable() {
 }
 
 function toggleMicSos() {
+    stopWalle();
     if (sosState !== 'IDLE' && sosState !== 'PASSIVE_LISTENING') {
         stopVoiceCapture();
         return;
@@ -494,6 +547,7 @@ function enableHandsFree() {
 }
 
 function disableHandsFree() {
+    stopWalle();
     handsFreeEnabled = false;
     stopPassiveListening();
     if (sosState === 'IDLE') {
@@ -555,8 +609,9 @@ function startCommandListening() {
     });
 }
 
-function recognizeCommand(text) {
-    const lower = text.toLowerCase().replace(/\s+/g, ' ').trim();
+function recognizeCommand(text, options) {
+    const allowBareBuzzerWords = !!(options && options.allowBareBuzzerWords);
+    const lower = normalizeTranscript(text);
 
     for (const phrase of EMERGENCY_COMMAND_PHRASES) {
         if (lower.includes(phrase)) {
@@ -576,6 +631,15 @@ function recognizeCommand(text) {
         }
     }
 
+    if (allowBareBuzzerWords) {
+        if (lower === 'on') {
+            return 'BUZZER_ON';
+        }
+        if (lower === 'off') {
+            return 'BUZZER_OFF';
+        }
+    }
+
     return 'UNKNOWN';
 }
 
@@ -589,7 +653,7 @@ function handleCommandResult(finalTranscript, interimTranscript) {
         return;
     }
 
-    const command = recognizeCommand(finalTranscript);
+    const command = recognizeCommand(finalTranscript, { allowBareBuzzerWords: true });
 
     switch (command) {
         case 'EMERGENCY':
@@ -641,14 +705,35 @@ async function executeBuzzerCommand(command) {
 
     if (succeeded) {
         const text = desiredOn ? 'Buzzer turned on.' : 'Buzzer turned off.';
-        speak(text, () => {
-            returnToPassive();
-        });
+        finishBuzzerCommand(text);
     } else {
-        speak('I could not reach the device to change the buzzer. Please try again.', () => {
-            returnToPassive();
-        });
+        finishBuzzerCommand('I could not reach the device to change the buzzer. Please try again.');
     }
+}
+
+function clearSosReturnFallback() {
+    if (sosReturnFallbackTimer !== null) {
+        clearTimeout(sosReturnFallbackTimer);
+        sosReturnFallbackTimer = null;
+    }
+}
+
+function scheduleSosReturnToPassive() {
+    clearSosReturnFallback();
+    sosReturnFallbackTimer = setTimeout(() => {
+        sosReturnFallbackTimer = null;
+        if (sosState === 'EXECUTING_COMMAND') {
+            returnToPassive();
+        }
+    }, 10000);
+}
+
+function finishBuzzerCommand(text) {
+    scheduleSosReturnToPassive();
+    speak(text, () => {
+        clearSosReturnFallback();
+        returnToPassive();
+    });
 }
 
 function returnToPassive() {
@@ -721,6 +806,10 @@ function startRecognition(mode) {
         } else if (mode === 'passive') {
             setHandsfreeDenied('Speech recognition is not supported in this browser.');
             return;
+        } else if (mode === 'walle') {
+            walleState = 'OFF';
+            returnToPassive();
+            return;
         }
         sosState = 'IDLE';
         setMicListening(false);
@@ -731,6 +820,7 @@ function startRecognition(mode) {
     sosRecognition = recognition;
 
     recognition.onresult = (event) => {
+        if (isSpeaking) return;
         let finalTranscript = '';
         let interimTranscript = '';
 
@@ -745,6 +835,8 @@ function startRecognition(mode) {
 
         if (mode === 'passive') {
             handlePassiveResult(finalTranscript, interimTranscript);
+        } else if (mode === 'walle') {
+            handleWalleResult(finalTranscript);
         } else if (mode === 'command') {
             handleCommandResult(finalTranscript, interimTranscript);
         } else if (mode === 'capture') {
@@ -755,15 +847,19 @@ function startRecognition(mode) {
     };
 
     recognition.onend = () => {
-        sosRecognition = null;
+        if (sosRecognition === recognition) {
+            sosRecognition = null;
+        }
         if (mode === 'passive' && sosState === 'PASSIVE_LISTENING' && handsFreeEnabled) {
             schedulePassiveRestart();
-        } else if (mode === 'command' && (sosState === 'COMMAND_LISTENING' || sosState === 'EXECUTING_COMMAND')) {
-            try { restartRecognitionIfNeeded(recognition); } catch (e) { /* already started */ }
+        } else if (mode === 'walle' && walleState === 'ACTIVE') {
+            scheduleWalleRestart();
+        } else if (mode === 'command' && sosState === 'COMMAND_LISTENING' && handsFreeEnabled) {
+            scheduleRecognitionRestart('command');
         } else if (mode === 'capture' && sosState === 'LISTENING_FOR_EMERGENCY') {
-            try { restartRecognitionIfNeeded(recognition); } catch (e) { /* already started */ }
+            scheduleRecognitionRestart('capture');
         } else if (mode === 'confirm' && sosState === 'CONFIRMING_MESSAGE') {
-            try { restartRecognitionIfNeeded(recognition); } catch (e) { /* already started */ }
+            scheduleRecognitionRestart('confirm');
         }
     };
 
@@ -771,9 +867,35 @@ function startRecognition(mode) {
         if (event.error === 'no-speech') return;
         if (event.error === 'aborted') return;
         console.warn('[Voice SOS] Recognition error:', event.error);
+        if (event.error === 'network') {
+            if (mode === 'passive') {
+                passiveNetworkErrorCount += 1;
+                if (passiveNetworkErrorCount >= PASSIVE_NETWORK_ERROR_LIMIT) {
+                    passiveNetworkErrorCount = 0;
+                    stopRecognition();
+                    sosState = 'IDLE';
+                    updateHandsfreeUI();
+                    if (handsfreeHint) {
+                        handsfreeHint.textContent = 'Speech recognition had connection trouble. Toggle hands-free off and on to resume.';
+                    }
+                } else {
+                    schedulePassiveRestart();
+                }
+            } else if (mode === 'walle') {
+                scheduleWalleRestart();
+            } else {
+                scheduleRecognitionRestart(mode);
+            }
+            return;
+        }
         if (event.error === 'not-allowed' || event.error === 'service-not-allowed') {
             if (mode === 'passive') {
                 setHandsfreeDenied('Microphone access denied.');
+            } else if (mode === 'walle') {
+                walleState = 'OFF';
+                clearWalleRetryTimer();
+                walleRetryCount = 0;
+                returnToPassive();
             } else if (mode === 'command') {
                 sosState = 'IDLE';
                 updateHandsfreeUI();
@@ -788,10 +910,18 @@ function startRecognition(mode) {
 
     try {
         recognition.start();
+        recognitionRestartCount = 0;
+        passiveNetworkErrorCount = 0;
     } catch (e) {
         console.warn('[Voice SOS] Failed to start recognition:', e);
+        if (e && (e.name === 'InvalidStateError' || String(e.message || '').indexOf('InvalidStateError') !== -1)) {
+            scheduleRecognitionRestart(mode);
+            return;
+        }
         if (mode === 'passive') {
             setHandsfreeDenied('Microphone access error.');
+        } else if (mode === 'walle') {
+            scheduleWalleRestart();
         } else {
             sosState = 'IDLE';
             setMicListening(false);
@@ -799,10 +929,43 @@ function startRecognition(mode) {
     }
 }
 
-function restartRecognitionIfNeeded(recognition) {
-    if (sosRecognition === recognition) {
-        recognition.start();
+function canListenInMode(mode) {
+    if (mode === 'passive') {
+        return handsFreeEnabled && sosState === 'PASSIVE_LISTENING';
     }
+    if (mode === 'walle') {
+        return walleState === 'ACTIVE';
+    }
+    if (mode === 'command') {
+        return handsFreeEnabled && sosState === 'COMMAND_LISTENING';
+    }
+    if (mode === 'capture') {
+        return sosState === 'LISTENING_FOR_EMERGENCY';
+    }
+    if (mode === 'confirm') {
+        return sosState === 'CONFIRMING_MESSAGE';
+    }
+    return false;
+}
+
+function scheduleRecognitionRestart(mode) {
+    clearTimeout(recognitionRestartTimer);
+    if (recognitionRestartCount > 4) {
+        recognitionRestartCount = 0;
+        if (mode === 'command' || mode === 'capture' || mode === 'confirm') {
+            returnToPassive();
+        }
+        return;
+    }
+    recognitionRestartCount += 1;
+    recognitionRestartTimer = setTimeout(() => {
+        recognitionRestartTimer = null;
+        if (!canListenInMode(mode)) {
+            recognitionRestartCount = 0;
+            return;
+        }
+        startRecognition(mode);
+    }, 500);
 }
 
 function schedulePassiveRestart() {
@@ -822,10 +985,30 @@ function schedulePassiveRestart() {
     }, 600);
 }
 
+/* TEMPORARY DIAGNOSTIC — Step 6B.1: log FINAL passive transcripts and Wall-E wake matches.
+   Remove this logging once voice reliability verification is complete. */
 function handlePassiveResult(finalTranscript, interimTranscript) {
+    if (finalTranscript) {
+        console.log('[Voice] passive final: "' + finalTranscript + '"');
+    }
     if (finalTranscript && shouldDeclareWake(finalTranscript)) {
         stopRecognition();
         startCommandListening();
+        return;
+    }
+    if (finalTranscript && isWallEWakePhrase(finalTranscript)) {
+        if (isWalleExitPhrase(finalTranscript)) {
+            /* "goodbye wally" / "stop wall-e" etc. must never re-activate Wall-E. */
+            console.log('[Voice] Wall-E wake rejected (exit phrase): "' + finalTranscript + '"');
+        } else {
+            /* TEMPORARY DIAGNOSTIC — see note above. */
+            console.log('[Voice] Wall-E wake detected: "' + finalTranscript + '"');
+            stopRecognition();
+            activateWallE();
+        }
+    } else if (finalTranscript && isUnsafeWallEFuzzyCandidate(finalTranscript)) {
+        /* TEMPORARY DIAGNOSTIC — see note above. */
+        console.log('[Voice] Wall-E wake rejected: "' + finalTranscript + '"');
     }
 }
 
@@ -833,6 +1016,9 @@ function stopRecognition(resetState) {
     clearTimeout(passiveRestartTimer);
     passiveRestartTimer = null;
     passiveRestartCount = 0;
+    clearTimeout(recognitionRestartTimer);
+    recognitionRestartTimer = null;
+    recognitionRestartCount = 0;
     if (sosRecognition) {
         try { sosRecognition.abort(); } catch (e) { /* ignore */ }
         sosRecognition = null;
@@ -1061,6 +1247,268 @@ function resetVoiceSos() {
     } else {
         updateHandsfreeUI();
     }
+}
+
+/* ── Wall-E voice assistant ──────────────────────────────── */
+
+function normalizeTranscript(text) {
+    return String(text || '').toLowerCase().replace(/[^a-z\s']/g, ' ').replace(/\s+/g, ' ').trim();
+}
+
+function transcriptContainsPhrase(lower, phrase) {
+    const p = normalizeTranscript(phrase);
+    if (lower === p) return true;
+    if (lower.startsWith(p + ' ')) return true;
+    if (lower.endsWith(' ' + p)) return true;
+    if (lower.includes(' ' + p + ' ')) return true;
+    return false;
+}
+
+function transcriptStartsWithPhrase(rest, phrase) {
+    const p = normalizeTranscript(phrase);
+    return rest === p || rest.startsWith(p + ' ');
+}
+
+function isWallEWakePhrase(transcript) {
+    const lower = normalizeTranscript(transcript);
+    for (const phrase of WALLE_WAKE_PHRASES) {
+        if (transcriptContainsPhrase(lower, phrase)) {
+            return true;
+        }
+    }
+    if (lower === 'hey' || lower.startsWith('hey ')) {
+        const rest = lower === 'hey' ? '' : lower.slice(4).replace(/^\s+/, '');
+        if (rest) {
+            for (const phrase of WALLE_HEY_ONLY_PHRASES) {
+                if (transcriptStartsWithPhrase(rest, phrase)) {
+                    return true;
+                }
+            }
+        }
+    }
+    return false;
+}
+
+function isUnsafeWallEFuzzyCandidate(transcript) {
+    const lower = normalizeTranscript(transcript);
+    if (lower === 'hey' || lower.startsWith('hey ')) {
+        return false;
+    }
+    for (const phrase of WALLE_HEY_ONLY_PHRASES) {
+        if (transcriptContainsPhrase(lower, phrase)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+function isWalleExitPhrase(transcript) {
+    const lower = normalizeTranscript(transcript);
+    const exactPhrases = [normalizeTranscript("that's all"), normalizeTranscript('thats all')];
+    if (exactPhrases.indexOf(lower) !== -1) {
+        return true;
+    }
+    for (const phrase of WALLE_EXIT_PHRASES) {
+        const p = normalizeTranscript(phrase);
+        if (exactPhrases.indexOf(p) !== -1) {
+            continue;
+        }
+        if (lower === p || lower.startsWith(p + ' ') || lower.endsWith(' ' + p) || lower.includes(' ' + p + ' ') || lower.includes(p + '.')) {
+            return true;
+        }
+    }
+    for (const name of WALLE_WAKE_PHRASES.concat(WALLE_HEY_ONLY_PHRASES)) {
+        const farewells = [normalizeTranscript('goodbye ' + name), normalizeTranscript('stop ' + name)];
+        for (const p of farewells) {
+            if (lower === p || lower.startsWith(p + ' ') || lower.endsWith(' ' + p) || lower.includes(' ' + p + ' ') || lower.includes(p + '.')) {
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
+function clearWalleRetryTimer() {
+    if (walleRetryTimer !== null) {
+        clearTimeout(walleRetryTimer);
+        walleRetryTimer = null;
+    }
+}
+
+function stopWalle() {
+    clearWalleRetryTimer();
+    walleRetryCount = 0;
+    walleState = 'OFF';
+    walleSessionId = null;
+    stopRecognition();
+}
+
+function startWalleListening() {
+    if (walleState !== 'ACTIVE') return;
+    if (!speechRecognitionAvailable()) {
+        walleState = 'OFF';
+        returnToPassive();
+        return;
+    }
+    startRecognition('walle');
+}
+
+function scheduleWalleRestart() {
+    clearWalleRetryTimer();
+    if (walleState !== 'ACTIVE') return;
+    if (walleRetryCount > 4) {
+        walleState = 'OFF';
+        walleRetryCount = 0;
+        returnToPassive();
+        return;
+    }
+    walleRetryCount += 1;
+    walleRetryTimer = setTimeout(() => {
+        walleRetryTimer = null;
+        if (walleState === 'ACTIVE') {
+            startWalleListening();
+        }
+    }, 400);
+}
+
+function createWalleSessionId() {
+    if (window.crypto && typeof window.crypto.randomUUID === 'function') {
+        return window.crypto.randomUUID();
+    }
+    return 'walle-' + Date.now() + '-' + Math.floor(Math.random() * 1000000);
+}
+
+function activateWallE() {
+    clearWalleRetryTimer();
+    walleRetryCount = 0;
+    walleSessionId = createWalleSessionId();
+    walleState = 'ACTIVE';
+    stopRecognition();
+    sosState = 'IDLE';
+    updateHandsfreeUI();
+    speak('Yes? What do you need?', () => {
+        if (walleState === 'ACTIVE') {
+            startWalleListening();
+        }
+    });
+}
+
+function exitWallE() {
+    stopRecognition();
+    clearWalleRetryTimer();
+    walleRetryCount = 0;
+    walleState = 'OFF';
+    walleSessionId = null;
+    speak('Okay.', () => {
+        returnToPassive();
+    });
+}
+
+function routeWalleToSos(isWake) {
+    stopRecognition();
+    clearWalleRetryTimer();
+    walleRetryCount = 0;
+    walleState = 'OFF';
+    walleSessionId = null;
+    if (isWake) {
+        startCommandListening();
+    } else {
+        startVoiceCapture();
+    }
+}
+
+function handleWalleResult(finalTranscript) {
+    if (!finalTranscript) {
+        return;
+    }
+    if (shouldDeclareWake(finalTranscript)) {
+        routeWalleToSos(true);
+        return;
+    }
+    if (recognizeCommand(finalTranscript) === 'EMERGENCY') {
+        routeWalleToSos(false);
+        return;
+    }
+    if (isWalleExitPhrase(finalTranscript)) {
+        exitWallE();
+        return;
+    }
+    walleRetryCount = 0;
+    sendWallEMessage(finalTranscript);
+}
+
+async function sendWallEMessage(message) {
+    if (walleState !== 'ACTIVE' || !walleSessionId) {
+        return;
+    }
+    walleState = 'PROCESSING';
+    stopRecognition();
+
+    let reply = '';
+    let failType = null;
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), WALLE_AI_TIMEOUT_MS);
+    try {
+        const response = await fetch(WALLE_ENDPOINT, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
+            body: JSON.stringify({ sessionId: walleSessionId, message }),
+            signal: controller.signal
+        });
+        if (response.status === 503) {
+            failType = 'UNAVAILABLE';
+        } else if (!response.ok) {
+            failType = 'INTERNAL';
+        } else {
+            try {
+                const data = await response.json();
+                reply = (data && typeof data.reply === 'string') ? data.reply : '';
+            } catch (err) {
+                reply = '';
+            }
+            if (!reply) {
+                failType = 'INTERNAL';
+            }
+        }
+    } catch (error) {
+        if (error && error.name === 'AbortError') {
+            failType = 'TIMEOUT';
+        } else if (typeof window !== 'undefined' && window.navigator && window.navigator.onLine === false) {
+            failType = 'OFFLINE';
+        } else {
+            failType = 'TIMEOUT';
+        }
+    } finally {
+        clearTimeout(timeoutId);
+    }
+
+    if (walleState !== 'PROCESSING') {
+        return;
+    }
+
+    if (failType) {
+        const failMessages = {
+            TIMEOUT: WALLE_SERVICE_MSG,
+            UNAVAILABLE: WALLE_UNAVAILABLE_MSG,
+            INTERNAL: WALLE_INTERNAL_MSG,
+            OFFLINE: WALLE_OFFLINE_MSG
+        };
+        speak(failMessages[failType], () => {
+            if (walleState === 'PROCESSING') {
+                walleState = 'ACTIVE';
+                startWalleListening();
+            }
+        });
+        return;
+    }
+
+    walleState = 'SPEAKING';
+    speak(reply, () => {
+        if (walleState === 'SPEAKING') {
+            walleState = 'ACTIVE';
+            startWalleListening();
+        }
+    });
 }
 
 /* ── Location ──────────────────────────────────────────────── */
