@@ -457,6 +457,12 @@
 
     <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin=""></script>
 
+    <script>
+        if (location.protocol !== 'file:' && location.hostname !== 'localhost' && location.hostname !== '127.0.0.1') {
+            window.API_BASE_URL = 'https://caretaker-interface-backend.vercel.app';
+        }
+    </script>
+
     <script src="script.js"></script>
 </body>
 </html>
