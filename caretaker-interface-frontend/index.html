@@ -49,6 +49,17 @@
                 </ul>
             </nav>
 
+            <div class="sidebar-users" id="sidebarUsersBlock" hidden>
+                <div class="sidebar-users-head">
+                    <p class="nav-label">Monitored Users</p>
+                    <button class="icon-btn" id="addUserBtn" type="button" title="Add a monitored (blind) user" aria-label="Add a monitored user">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><line x1="12" y1="5" x2="12" y2="19"></line><line x1="5" y1="12" x2="19" y2="12"></line></svg>
+                    </button>
+                </div>
+                <ul class="sidebar-user-list" id="sidebarUserList"></ul>
+                <p class="sidebar-users-empty" id="sidebarUsersEmpty" hidden>No monitored users linked yet.</p>
+            </div>
+
             <div class="sidebar-footer">
                 <div class="foot-cap">
                     <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"></circle><path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3"></path><line x1="12" y1="17" x2="12.01" y2="17"></line></svg>
@@ -66,15 +77,19 @@
                     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><line x1="4" y1="7" x2="20" y2="7"></line><line x1="4" y1="12" x2="20" y2="12"></line><line x1="4" y1="17" x2="20" y2="17"></line></svg>
                 </button>
                 <div class="person-info">
-                    <div class="avatar">MS</div>
-                    <div class="person-meta">
-                        <h2>Mara Smith</h2>
-                        <span>Monitored person · <span class="mono">CAP-7F2A</span></span>
+                    <div class="avatar" id="headerAvatar">MS</div>
+                    <div class="person-meta" id="headerPersonMeta">
+                        <h2 id="headerUserName">Mara Smith</h2>
+                        <span id="headerUserRole">Monitored person · <span class="mono">CAP-7F2A</span></span>
                     </div>
                 </div>
             </div>
 
             <div class="header-group">
+                <button class="btn btn-outline btn-logout" id="logoutBtn" type="button" hidden title="Sign out of the console">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"></path><polyline points="16 17 21 12 16 7"></polyline><line x1="21" y1="12" x2="9" y2="12"></line></svg>
+                    Sign Out
+                </button>
                 <div class="header-clocker">
                     <small>Current Time</small>
                     <span id="headerClock" class="mono">—</span>
@@ -455,6 +470,46 @@
         </main>
     </div>
 
+    <div class="auth-overlay" id="authOverlay" hidden role="alertdialog" aria-labelledby="authOverlayTitle" aria-describedby="authOverlayError">
+        <div class="auth-overlay-card">
+            <div class="auth-overlay-icon">
+                <svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><rect x="3" y="11" width="18" height="11" rx="2"></rect><path d="M7 11V7a5 5 0 0 1 10 0v4"></path></svg>
+            </div>
+            <h2 id="authOverlayTitle">Session required</h2>
+            <p id="authOverlayError">Checking your session…</p>
+            <div class="auth-overlay-actions">
+                <button class="btn btn-outline" id="authOverlayRetry" type="button">Retry</button>
+                <a class="btn btn-primary" id="authOverlayLogin" href="auth.html">Go to Sign In</a>
+            </div>
+        </div>
+    </div>
+
+    <div class="modal-backdrop" id="blindUserModal" hidden>
+        <div class="modal" role="dialog" aria-modal="true" aria-labelledby="blindUserModalTitle">
+            <div class="modal-head">
+                <h3 id="blindUserModalTitle">Add Monitored User</h3>
+                <button class="icon-btn" id="blindUserModalClose" type="button" aria-label="Close dialog">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg>
+                </button>
+            </div>
+            <form id="blindUserForm" novalidate>
+                <label class="field">
+                    <span class="field-label">Full name</span>
+                    <input type="text" id="blindUserName" class="field-input" autocomplete="off" placeholder="e.g. Alex Rivers" required>
+                </label>
+                <label class="field">
+                    <span class="field-label">Email</span>
+                    <input type="email" id="blindUserEmail" class="field-input" autocomplete="off" placeholder="alex@example.com" required>
+                </label>
+                <p class="auth-error" id="blindUserFormError"></p>
+                <div class="modal-actions">
+                    <button class="btn btn-outline" id="blindUserFormCancel" type="button">Cancel</button>
+                    <button class="btn btn-primary" id="blindUserFormSubmit" type="submit">Save</button>
+                </div>
+            </form>
+        </div>
+    </div>
+
     <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin=""></script>
 
     <script>
@@ -463,6 +518,7 @@
         }
     </script>
 
+    <script src="auth.js"></script>
     <script src="script.js"></script>
 </body>
 </html>

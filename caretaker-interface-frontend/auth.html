@@ -1,0 +1,75 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Smart Assistive Cap · Caretaker Sign In</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="style.css">
+</head>
+<body class="auth-page">
+    <main class="auth-wrap">
+        <div class="auth-card" id="authCard">
+
+            <div class="auth-brand">
+                <div class="brand-mark">
+                    <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M13 2 3 14h7l-1 8 10-12h-7l1-8z"></path></svg>
+                </div>
+                <div class="brand-text">
+                    <b>SmartAssist</b>
+                    <span>Caretaker Console</span>
+                </div>
+            </div>
+
+            <div class="auth-tabs" role="tablist" aria-label="Sign in or create account">
+                <button class="auth-tab active" id="tabLogin" type="button" role="tab" aria-selected="true">Sign In</button>
+                <button class="auth-tab" id="tabRegister" type="button" role="tab" aria-selected="false">Create Account</button>
+            </div>
+
+            <p class="auth-note" id="authNote" role="status"></p>
+
+            <form class="auth-form" id="loginForm" novalidate>
+                <label class="field">
+                    <span class="field-label">Email</span>
+                    <input type="email" id="loginEmail" class="field-input" autocomplete="username" placeholder="you@care-team.org" required>
+                </label>
+                <label class="field">
+                    <span class="field-label">Password</span>
+                    <input type="password" id="loginPassword" class="field-input" autocomplete="current-password" placeholder="••••••••" required>
+                </label>
+                <p class="auth-error" id="loginError"></p>
+                <button class="btn btn-primary btn-block" id="loginSubmit" type="submit">Sign In</button>
+            </form>
+
+            <form class="auth-form" id="registerForm" hidden novalidate>
+                <label class="field">
+                    <span class="field-label">Full name</span>
+                    <input type="text" id="regName" class="field-input" autocomplete="name" placeholder="Mara Smith" required>
+                </label>
+                <label class="field">
+                    <span class="field-label">Email</span>
+                    <input type="email" id="regEmail" class="field-input" autocomplete="username" placeholder="you@care-team.org" required>
+                </label>
+                <label class="field">
+                    <span class="field-label">Password</span>
+                    <input type="password" id="regPassword" class="field-input" autocomplete="new-password" placeholder="At least 8 characters" minlength="8" required>
+                </label>
+                <p class="auth-error" id="regError"></p>
+                <button class="btn btn-primary btn-block" id="regSubmit" type="submit">Create Account</button>
+            </form>
+
+            <p class="auth-foot">Access is restricted to authorized care team members.</p>
+
+        </div>
+    </main>
+
+    <script>
+        if (location.protocol !== 'file:' && location.hostname !== 'localhost' && location.hostname !== '127.0.0.1') {
+            window.API_BASE_URL = 'https://caretaker-interface-backend.vercel.app';
+        }
+    </script>
+    <script src="auth.js"></script>
+</body>
+</html>

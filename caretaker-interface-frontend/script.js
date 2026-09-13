@@ -10,7 +10,10 @@ let isSimulationRunning = false;
 let baseLatitude = 22.3072;
 let baseLongitude = 73.1812;
 const MAX_HISTORY_ENTRIES = 30;
-const API_BASE_URL = (typeof window !== 'undefined' && window.API_BASE_URL) || 'http://localhost:3000';
+const API_BASE_URL = (typeof window !== 'undefined' && window.API_BASE_URL)
+    || ((typeof location !== 'undefined' && location.hostname)
+        ? `${location.protocol}//${location.hostname}:3000`
+        : 'http://localhost:3000');
 const EVENTS_ENDPOINT = `${API_BASE_URL}/api/events`;
 const LOCATION_ENDPOINT = `${API_BASE_URL}/api/location`;
 const API_POLL_INTERVAL = 5000;
@@ -639,7 +642,8 @@ async function updateAlertStatus(alertId, status) {
         const response = await fetch(`${EVENTS_ENDPOINT}/${encodeURIComponent(alertId)}`, {
             method: 'PATCH',
             headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
-            body: JSON.stringify({ status })
+            body: JSON.stringify({ status }),
+            credentials: 'include'
         });
         if (!response.ok) {
             throw new Error(`HTTP ${response.status}`);
@@ -1019,7 +1023,7 @@ function setApiStatus(state) {
 }
 
 async function fetchEventsFromAPI() {
-    const response = await fetch(EVENTS_ENDPOINT, { headers: { 'Accept': 'application/json' } });
+    const response = await fetch(EVENTS_ENDPOINT, { headers: { 'Accept': 'application/json' }, credentials: 'include' });
     if (!response.ok) {
         throw new Error(`HTTP ${response.status}`);
     }
@@ -1123,7 +1127,7 @@ async function loadWalleSessions() {
         setWalleListState('Loading conversations…', 'Fetching recent Wall-E conversations.');
     }
     try {
-        const response = await fetch(WALLE_SESSIONS_ENDPOINT, { headers: { 'Accept': 'application/json' } });
+        const response = await fetch(WALLE_SESSIONS_ENDPOINT, { headers: { 'Accept': 'application/json' }, credentials: 'include' });
         if (!response.ok) {
             throw new Error(`HTTP ${response.status}`);
         }
@@ -1301,7 +1305,8 @@ async function loadWalleTranscript(sessionId) {
 
     try {
         const response = await fetch(`${API_BASE_URL}/api/walle/history/${encodeURIComponent(sessionId)}`, {
-            headers: { 'Accept': 'application/json' }
+            headers: { 'Accept': 'application/json' },
+            credentials: 'include'
         });
 
         if (selectedWalleSessionId !== target) return;
@@ -1383,7 +1388,7 @@ function createWalleMsg(turn) {
 }
 
 async function fetchLocationFromAPI() {
-    const response = await fetch(LOCATION_ENDPOINT, { headers: { 'Accept': 'application/json' } });
+    const response = await fetch(LOCATION_ENDPOINT, { headers: { 'Accept': 'application/json' }, credentials: 'include' });
     if (!response.ok) {
         throw new Error(`HTTP ${response.status}`);
     }
@@ -1710,19 +1715,355 @@ document.getElementById('simSOSHeartRate').addEventListener('click', () => {
     receiveEvent(event);
 });
 
-renderInitialHistory();
-collectProcessedAlertIds();
-updateHeartRateFeatureUI();
+/* ── Sign-in gate, identity, and monitored-user management ──────────────── */
 
-const apiEndpointEl = document.getElementById('apiEndpoint');
-if (apiEndpointEl) apiEndpointEl.textContent = EVENTS_ENDPOINT;
-const ribbonEndEl = document.getElementById('systemStateEndpoint');
-if (ribbonEndEl) ribbonEndEl.textContent = EVENTS_ENDPOINT;
+let currentUser = null;
+let authorizedBlindUsers = [];
+let selectedBlindUserId = null;
+let blindUserModalMode = 'create';
+let editingBlindUserId = null;
 
-setApiStatus('unknown');
-setLocationStatus('unknown');
-loadWalleSessions();
-initMap(baseLatitude, baseLongitude);
-initializeFromHistory();
-tickClock();
-setInterval(tickClock, 1000);
+const UI_EMAIL_PATTERN = /^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/;
+const UI_ICON_EDIT = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M17 3a2.828 2.828 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5L17 3z"></path></svg>';
+const UI_ICON_UNLINK = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><circle cx="12" cy="12" r="9"></circle><line x1="8" y1="12" x2="16" y2="12"></line></svg>';
+
+function startDashboard() {
+    renderInitialHistory();
+    collectProcessedAlertIds();
+    updateHeartRateFeatureUI();
+
+    const apiEndpointEl = document.getElementById('apiEndpoint');
+    if (apiEndpointEl) apiEndpointEl.textContent = EVENTS_ENDPOINT;
+    const ribbonEndEl = document.getElementById('systemStateEndpoint');
+    if (ribbonEndEl) ribbonEndEl.textContent = EVENTS_ENDPOINT;
+
+    setApiStatus('unknown');
+    setLocationStatus('unknown');
+    loadWalleSessions();
+    initMap(baseLatitude, baseLongitude);
+    initializeFromHistory();
+    tickClock();
+    setInterval(tickClock, 1000);
+}
+
+function showAuthOverlay(message) {
+    const overlay = document.getElementById('authOverlay');
+    if (!overlay) return;
+    const errorEl = document.getElementById('authOverlayError');
+    if (errorEl && message) errorEl.textContent = message;
+    overlay.hidden = false;
+}
+
+function hideAuthOverlay() {
+    const overlay = document.getElementById('authOverlay');
+    if (overlay) overlay.hidden = true;
+}
+
+// Returns true when the error is an expired/invalid session (handled by
+// redirecting to the sign-in page); false otherwise.
+function handleAuthError(err) {
+    if (err && err.status === 401) {
+        window.location.replace('auth.html');
+        return true;
+    }
+    return false;
+}
+
+function getInitials(name) {
+    const parts = String(name || '').trim().split(/\s+/).filter(Boolean);
+    if (parts.length === 0) return '?';
+    const first = parts[0][0] || '';
+    const last = parts.length > 1 ? parts[parts.length - 1][0] : '';
+    return (first + last).toUpperCase();
+}
+
+function renderHeaderIdentity() {
+    const nameEl = document.getElementById('headerUserName');
+    const roleEl = document.getElementById('headerUserRole');
+    const avatarEl = document.getElementById('headerAvatar');
+
+    const selected = selectedBlindUserId
+        ? authorizedBlindUsers.find(user => user.id === selectedBlindUserId)
+        : null;
+
+    if (selected) {
+        if (nameEl) nameEl.textContent = selected.name;
+        if (avatarEl) avatarEl.textContent = getInitials(selected.name);
+        if (roleEl) roleEl.textContent = 'Monitored person';
+    } else if (currentUser) {
+        if (nameEl) nameEl.textContent = currentUser.name;
+        if (avatarEl) avatarEl.textContent = getInitials(currentUser.name);
+        if (roleEl) roleEl.textContent = 'Caretaker · console access';
+    }
+}
+
+function renderBlindUserList() {
+    const list = document.getElementById('sidebarUserList');
+    const emptyEl = document.getElementById('sidebarUsersEmpty');
+    if (!list) return;
+
+    list.textContent = '';
+    if (emptyEl) emptyEl.hidden = authorizedBlindUsers.length > 0;
+
+    authorizedBlindUsers.forEach((user) => {
+        const item = document.createElement('li');
+        item.className = 'sidebar-user' + (user.id === selectedBlindUserId ? ' active' : '');
+        item.dataset.userId = user.id;
+
+        const selectBtn = document.createElement('button');
+        selectBtn.type = 'button';
+        selectBtn.className = 'sidebar-user-main';
+        selectBtn.setAttribute('aria-label', `Select ${user.name}`);
+        selectBtn.addEventListener('click', () => selectBlindUser(user.id));
+
+        const avatar = document.createElement('span');
+        avatar.className = 'sidebar-user-avatar';
+        avatar.textContent = getInitials(user.name);
+
+        const meta = document.createElement('span');
+        meta.className = 'sidebar-user-meta';
+        const metaName = document.createElement('b');
+        metaName.textContent = user.name;
+        const metaEmail = document.createElement('span');
+        metaEmail.textContent = user.email;
+        meta.appendChild(metaName);
+        meta.appendChild(metaEmail);
+
+        selectBtn.appendChild(avatar);
+        selectBtn.appendChild(meta);
+
+        const actions = document.createElement('span');
+        actions.className = 'sidebar-user-actions';
+
+        const editBtn = document.createElement('button');
+        editBtn.type = 'button';
+        editBtn.className = 'icon-btn';
+        editBtn.title = 'Edit user';
+        editBtn.setAttribute('aria-label', `Edit ${user.name}`);
+        editBtn.innerHTML = UI_ICON_EDIT;
+        editBtn.addEventListener('click', (event) => {
+            event.stopPropagation();
+            openBlindUserModal('edit', user);
+        });
+
+        const unlinkBtn = document.createElement('button');
+        unlinkBtn.type = 'button';
+        unlinkBtn.className = 'icon-btn';
+        unlinkBtn.title = 'Stop monitoring';
+        unlinkBtn.setAttribute('aria-label', `Stop monitoring ${user.name}`);
+        unlinkBtn.innerHTML = UI_ICON_UNLINK;
+        unlinkBtn.addEventListener('click', (event) => {
+            event.stopPropagation();
+            confirmUnlinkBlindUser(user.id);
+        });
+
+        actions.appendChild(editBtn);
+        actions.appendChild(unlinkBtn);
+
+        item.appendChild(selectBtn);
+        item.appendChild(actions);
+        list.appendChild(item);
+    });
+}
+
+function selectBlindUser(id) {
+    const user = authorizedBlindUsers.find(item => item.id === id);
+    selectedBlindUserId = user ? id : null;
+    renderBlindUserList();
+    renderHeaderIdentity();
+}
+
+function normalizeSelection() {
+    if (!selectedBlindUserId || !authorizedBlindUsers.some(user => user.id === selectedBlindUserId)) {
+        selectedBlindUserId = authorizedBlindUsers.length ? authorizedBlindUsers[0].id : null;
+        renderBlindUserList();
+        renderHeaderIdentity();
+    }
+}
+
+async function refreshBlindUsers() {
+    try {
+        const data = await fetchAuthorizedBlindUsers();
+        authorizedBlindUsers = (data && Array.isArray(data.blindUsers)) ? data.blindUsers : [];
+    } catch (error) {
+        if (handleAuthError(error)) return false;
+        console.warn('[Blind users] Failed to refresh list:', error.message || error);
+        return false;
+    }
+    normalizeSelection();
+    renderBlindUserList();
+    renderHeaderIdentity();
+    return true;
+}
+
+function openBlindUserModal(mode, user) {
+    const modal = document.getElementById('blindUserModal');
+    if (!modal) return;
+
+    blindUserModalMode = mode;
+    editingBlindUserId = (mode === 'edit' && user) ? user.id : null;
+
+    const titleEl = document.getElementById('blindUserModalTitle');
+    if (titleEl) titleEl.textContent = mode === 'edit' ? 'Edit Monitored User' : 'Add Monitored User';
+
+    const errorEl = document.getElementById('blindUserFormError');
+    if (errorEl) errorEl.textContent = '';
+
+    const nameEl = document.getElementById('blindUserName');
+    const emailEl = document.getElementById('blindUserEmail');
+    if (nameEl) nameEl.value = (mode === 'edit' && user) ? user.name : '';
+    if (emailEl) emailEl.value = (mode === 'edit' && user) ? user.email : '';
+
+    modal.hidden = false;
+    if (nameEl) nameEl.focus();
+}
+
+function closeBlindUserModal() {
+    const modal = document.getElementById('blindUserModal');
+    if (modal) modal.hidden = true;
+    blindUserModalMode = 'create';
+    editingBlindUserId = null;
+}
+
+function setModalError(errorEl, message) {
+    if (!errorEl) return;
+    errorEl.textContent = message || '';
+    errorEl.classList.toggle('visible', Boolean(message));
+}
+
+async function handleBlindUserFormSubmit(event) {
+    event.preventDefault();
+
+    const nameEl = document.getElementById('blindUserName');
+    const emailEl = document.getElementById('blindUserEmail');
+    const errorEl = document.getElementById('blindUserFormError');
+    const submitBtn = document.getElementById('blindUserFormSubmit');
+    if (!nameEl || !emailEl || !errorEl || !submitBtn) return;
+
+    const name = nameEl.value.trim();
+    const email = emailEl.value.trim();
+
+    setModalError(errorEl, null);
+    if (!name) return setModalError(errorEl, 'Enter a full name.');
+    if (!UI_EMAIL_PATTERN.test(email)) return setModalError(errorEl, 'Enter a valid email address.');
+
+    submitBtn.disabled = true;
+    const originalLabel = submitBtn.textContent;
+    submitBtn.textContent = blindUserModalMode === 'edit' ? 'Saving…' : 'Adding…';
+
+    const mode = blindUserModalMode;
+    const targetId = editingBlindUserId;
+    let focusId = null;
+
+    try {
+        if (mode === 'edit' && targetId) {
+            await updateBlindUserIdentity(targetId, { name, email });
+            focusId = targetId;
+        } else {
+            const created = await createBlindUserIdentity(name, email);
+            const newId = created && created.user && created.user.id;
+            if (!newId) throw new Error('Creation response did not include a user id');
+            await linkBlindUserToCaretaker(newId);
+            focusId = newId;
+        }
+        closeBlindUserModal();
+        await refreshBlindUsers();
+        if (focusId) selectBlindUser(focusId);
+    } catch (error) {
+        if (handleAuthError(error)) return;
+        let message = error.message || 'Operation failed. Please try again.';
+        if (error && error.status === 409) message = 'That email is already used by another account.';
+        setModalError(errorEl, message);
+    } finally {
+        submitBtn.disabled = false;
+        submitBtn.textContent = originalLabel;
+    }
+}
+
+function confirmUnlinkBlindUser(id) {
+    const user = authorizedBlindUsers.find(item => item.id === id);
+    const name = user ? user.name : 'this user';
+    if (!window.confirm(`Stop monitoring ${name}? They will disappear from this console until linked again.`)) {
+        return;
+    }
+    deactivateBlindUserRelationship(id)
+        .then(() => refreshBlindUsers())
+        .catch((error) => {
+            if (error && error.status === 404) {
+                refreshBlindUsers();
+                return;
+            }
+            if (handleAuthError(error)) return;
+            window.alert(error.message || 'Could not stop monitoring this user.');
+        });
+}
+
+async function bootDashboard() {
+    showAuthOverlay('Checking your session…');
+
+    let session = null;
+    try {
+        session = await checkCurrentUser();
+    } catch (error) {
+        if (handleAuthError(error)) return;
+        showAuthOverlay('Could not reach the console backend. Is the backend server running?');
+        return;
+    }
+
+    if (!session || !session.authenticated || !session.user || session.user.role !== 'CARETAKER') {
+        window.location.replace('auth.html');
+        return;
+    }
+
+    currentUser = session.user;
+
+    try {
+        const data = await fetchAuthorizedBlindUsers();
+        authorizedBlindUsers = (data && Array.isArray(data.blindUsers)) ? data.blindUsers : [];
+    } catch (error) {
+        if (handleAuthError(error)) return;
+        authorizedBlindUsers = [];
+        console.warn('[Blind users] Failed to load monitored users:', error.message || error);
+    }
+
+    const logoutEl = document.getElementById('logoutBtn');
+    if (logoutEl) logoutEl.hidden = false;
+    const usersBlockEl = document.getElementById('sidebarUsersBlock');
+    if (usersBlockEl) usersBlockEl.hidden = false;
+
+    hideAuthOverlay();
+    renderHeaderIdentity();
+    renderBlindUserList();
+    normalizeSelection();
+    startDashboard();
+}
+
+const logoutBtnEl = document.getElementById('logoutBtn');
+if (logoutBtnEl) {
+    logoutBtnEl.addEventListener('click', async () => {
+        logoutBtnEl.disabled = true;
+        logoutBtnEl.innerHTML = 'Signing out…';
+        try {
+            await logoutCaretaker();
+        } catch (error) {
+            console.warn('[Auth] Sign-out request failed:', error.message || error);
+        }
+        window.location.replace('auth.html');
+    });
+}
+
+const addUserBtnEl = document.getElementById('addUserBtn');
+if (addUserBtnEl) addUserBtnEl.addEventListener('click', () => openBlindUserModal('create', null));
+
+const blindUserModalCloseEl = document.getElementById('blindUserModalClose');
+if (blindUserModalCloseEl) blindUserModalCloseEl.addEventListener('click', closeBlindUserModal);
+const blindUserFormCancelEl = document.getElementById('blindUserFormCancel');
+if (blindUserFormCancelEl) blindUserFormCancelEl.addEventListener('click', closeBlindUserModal);
+
+const blindUserFormEl = document.getElementById('blindUserForm');
+if (blindUserFormEl) blindUserFormEl.addEventListener('submit', handleBlindUserFormSubmit);
+
+const authOverlayRetryEl = document.getElementById('authOverlayRetry');
+if (authOverlayRetryEl) authOverlayRetryEl.addEventListener('click', bootDashboard);
+
+bootDashboard();
