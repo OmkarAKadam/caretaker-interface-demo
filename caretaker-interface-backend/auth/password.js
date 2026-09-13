@@ -14,6 +14,11 @@ const PASSWORD_MAX_BYTES = 72;
 const NAME_MAX_LENGTH = 120;
 const EMAIL_MAX_LENGTH = 254;
 const EMAIL_PATTERN = /^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/;
+const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+function isValidUuid(value) {
+    return typeof value === 'string' && UUID_PATTERN.test(value);
+}
 
 function normalizeEmail(value) {
     return typeof value === 'string' ? value.trim().toLowerCase() : '';
@@ -74,6 +79,7 @@ function safeUser(user) {
 
 module.exports = {
     ROUNDS,
+    isValidUuid,
     normalizeEmail,
     isValidEmail,
     isValidName,

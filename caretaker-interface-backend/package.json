@@ -8,7 +8,8 @@
     "start:env": "node --env-file-if-exists=.env server.js",
     "migrate": "node --env-file-if-exists=.env db/migrate.js",
     "migrate:status": "node --env-file-if-exists=.env db/migrate.js --status",
-    "test:auth": "node --env-file-if-exists=.env scripts/test-auth.js"
+    "test:auth": "node --env-file-if-exists=.env scripts/test-auth.js",
+    "test:stage3": "node --env-file-if-exists=.env scripts/test-stage3.js"
   },
   "license": "UNLICENSED",
   "private": true,

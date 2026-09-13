@@ -1,5 +1,7 @@
 'use strict';
 
+const { query } = require('../db/pool');
+const { isValidUuid } = require('./password');
 const {
     hashSessionToken,
     findSessionByTokenHash,
@@ -79,8 +81,60 @@ async function requireAuth(req, res, next) {
     }
 }
 
+// Role gate. Must be composed AFTER requireAuth (needs req.auth.user.role).
+function requireRole(role) {
+    return (req, res, next) => {
+        if (!req.auth || !req.auth.user) {
+            return res.status(401).json({ error: 'Not authenticated' });
+        }
+        if (req.auth.user.role !== role) {
+            return res.status(403).json({ error: 'Forbidden' });
+        }
+        next();
+    };
+}
+
+// Returns whether the caretaker has an ACTIVE relationship with the blind user.
+// This is THE database-level authorization check for blind-user access.
+async function hasActiveRelationship(caretakerId, blindUserId) {
+    const result = await query(
+        `SELECT 1 FROM care_relationships
+         WHERE caretaker_id = $1 AND blind_user_id = $2 AND status = 'ACTIVE'`,
+        [caretakerId, blindUserId]
+    );
+    return result.rows.length > 0;
+}
+
+// Guards any endpoint keyed by a blindUserId route param. The authenticated
+// caretaker must have an ACTIVE relationship to that blind user or the request
+// is treated as 404 — identical to "user does not exist", which prevents IDOR
+// from confirming whether an arbitrary UUID belongs to a real blind user.
+function requireBlindUserAccess(paramName) {
+    return async (req, res, next) => {
+        try {
+            const blindUserId = req.params[paramName];
+            if (!req.auth || !req.auth.user) {
+                return res.status(401).json({ error: 'Not authenticated' });
+            }
+            if (!isValidUuid(blindUserId)) {
+                return res.status(404).json({ error: 'Blind user not found' });
+            }
+            const allowed = await hasActiveRelationship(req.auth.user.id, blindUserId);
+            if (!allowed) {
+                return res.status(404).json({ error: 'Blind user not found' });
+            }
+            next();
+        } catch (err) {
+            next(err);
+        }
+    };
+}
+
 module.exports = {
     requireAuth,
+    requireRole,
+    requireBlindUserAccess,
+    hasActiveRelationship,
     setSessionCookie,
     clearSessionCookie,
     SESSION_COOKIE_NAME,

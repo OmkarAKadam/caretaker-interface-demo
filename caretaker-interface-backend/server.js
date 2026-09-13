@@ -2,6 +2,8 @@ const express = require('express');
 const cors = require('cors');
 const cookieParser = require('cookie-parser');
 const authRouter = require('./auth/routes');
+const blindUsersRouter = require('./care/blind-users');
+const careRouter = require('./care/caretaker');
 const { createMqttClient } = require('./mqtt/client');
 const { TOPICS } = require('./mqtt/topics');
 const { getSystemPrompt } = require('./ai/system-prompt');
@@ -685,6 +687,8 @@ app.get('/api/walle/history/:sessionId', (req, res) => {
 });
 
 app.use('/api/auth', authRouter);
+app.use('/api/blind-users', blindUsersRouter);
+app.use('/api/caretaker', careRouter);
 
 app.use((req, res) => {
     res.status(404).json({ error: 'Route not found' });
