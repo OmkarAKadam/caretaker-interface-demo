@@ -1,5 +1,7 @@
 const express = require('express');
 const cors = require('cors');
+const cookieParser = require('cookie-parser');
+const authRouter = require('./auth/routes');
 const { createMqttClient } = require('./mqtt/client');
 const { TOPICS } = require('./mqtt/topics');
 const { getSystemPrompt } = require('./ai/system-prompt');
@@ -30,8 +32,9 @@ app.use(cors({
         if (allowedOrigins.includes(origin)) return callback(null, true);
         return callback(null, false);
     },
-    credentials: false
+    credentials: true
 }));
+app.use(cookieParser());
 app.use(express.json());
 
 const events = new Map();
@@ -680,6 +683,8 @@ app.get('/api/walle/history/:sessionId', (req, res) => {
     }
     return res.status(200).json(transcript);
 });
+
+app.use('/api/auth', authRouter);
 
 app.use((req, res) => {
     res.status(404).json({ error: 'Route not found' });

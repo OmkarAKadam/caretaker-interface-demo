@@ -6,12 +6,15 @@
   "scripts": {
     "start": "node server.js",
     "start:env": "node --env-file-if-exists=.env server.js",
-    "migrate": "node db/migrate.js",
-    "migrate:status": "node db/migrate.js --status"
+    "migrate": "node --env-file-if-exists=.env db/migrate.js",
+    "migrate:status": "node --env-file-if-exists=.env db/migrate.js --status",
+    "test:auth": "node --env-file-if-exists=.env scripts/test-auth.js"
   },
   "license": "UNLICENSED",
   "private": true,
   "dependencies": {
+    "bcryptjs": "^3.0.3",
+    "cookie-parser": "^1.4.7",
     "cors": "^2.8.6",
     "express": "^5.2.1",
     "mqtt": "^5.15.2",

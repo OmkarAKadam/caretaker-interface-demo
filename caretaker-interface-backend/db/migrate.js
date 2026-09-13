@@ -13,6 +13,17 @@ function isStatusMode() {
     return process.argv.includes('--status') || process.argv.includes('-s');
 }
 
+// Rolls back a client's open transaction, swallowing any secondary error so the
+// original failure is preserved. This is intentionally NOT a transaction itself:
+// it only fires after a matching BEGIN.
+async function rollbackQuietly(client) {
+    try {
+        await client.query('ROLLBACK');
+    } catch (_rollbackErr) {
+        // Preserve the original error.
+    }
+}
+
 function readMigrations() {
     if (!fs.existsSync(MIGRATIONS_DIR)) {
         throw new Error(`Migrations directory not found: ${MIGRATIONS_DIR}`);
@@ -39,22 +50,34 @@ async function getApplied(client) {
 }
 
 async function ensureMigrationTable(client) {
-    await client.query('BEGIN');
-    await client.query(`
-        CREATE TABLE IF NOT EXISTS ${MIGRATIONS_TABLE} (
-            version    TEXT PRIMARY KEY,
-            name       TEXT NOT NULL,
-            applied_at TIMESTAMPTZ NOT NULL DEFAULT now()
-        )
-    `);
-    await client.query('COMMIT');
+    let began = false;
+    try {
+        await client.query('BEGIN');
+        began = true;
+        await client.query(`
+            CREATE TABLE IF NOT EXISTS ${MIGRATIONS_TABLE} (
+                version    TEXT PRIMARY KEY,
+                name       TEXT NOT NULL,
+                applied_at TIMESTAMPTZ NOT NULL DEFAULT now()
+            )
+        `);
+        await client.query('COMMIT');
+        began = false;
+    } catch (err) {
+        if (began) {
+            await rollbackQuietly(client);
+        }
+        throw err;
+    }
 }
 
 async function runMigration(client, migration) {
     const sql = fs.readFileSync(migration.sqlPath, 'utf8').trim();
 
-    await client.query('BEGIN');
+    let began = false;
     try {
+        await client.query('BEGIN');
+        began = true;
         if (sql) {
             await client.query(sql);
         }
@@ -63,12 +86,11 @@ async function runMigration(client, migration) {
             [migration.version, migration.name]
         );
         await client.query('COMMIT');
+        began = false;
         console.log(`[migrate] Applied  ${migration.name}`);
     } catch (err) {
-        try {
-            await client.query('ROLLBACK');
-        } catch (_rollbackErr) {
-            // Preserve the original error.
+        if (began) {
+            await rollbackQuietly(client);
         }
         throw new Error(`Migration ${migration.name} failed and was rolled back: ${err.message || err}`);
     }
