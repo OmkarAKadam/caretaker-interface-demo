@@ -6,6 +6,9 @@ const EVENTS_ENDPOINT = `${API_BASE_URL}/api/events`;
 const STREAM_ENDPOINT = `${API_BASE_URL}/api/events/stream`;
 const HEALTH_ENDPOINT = `${API_BASE_URL}/api/health`;
 
+const BG_DEVICE_ID_KEY = 'bg_device_id';
+const BG_DEVICE_TOKEN_KEY = 'bg_device_token';
+
 const DIRECTION_PHRASES = {
     OBSTACLE_LEFT: 'Obstacle on your left',
     OBSTACLE_CENTER: 'Obstacle ahead',
@@ -60,6 +63,9 @@ let walleState = 'OFF';
 let walleSessionId = null;
 let walleRetryTimer = null;
 let walleRetryCount = 0;
+
+let pairedDeviceId = null;
+let pairedDeviceToken = null;
 
 const CONFIRMATION_YES = ['yes', 'ok', 'okay', 'send', 'send it', 'send emergency alert', 'confirm', 'go ahead'];
 const CONFIRMATION_NO = ['no', 'cancel', 'stop', "don't send", 'do not send', 'never mind', 'nevermind', 'not now'];
@@ -177,6 +183,19 @@ const handsfreeHint = document.getElementById('handsfreeHint');
 const buzzerStateEl = document.getElementById('buzzerState');
 const buzzerStateText = document.getElementById('buzzerStateText');
 
+const pairCardEl = document.getElementById('pairCard');
+const pairStatusEl = document.getElementById('pairStatus');
+const pairChipEl = document.getElementById('pairChip');
+const pairChipTextEl = document.getElementById('pairChipText');
+const pairFormEl = document.getElementById('pairForm');
+const pairDeviceIdInput = document.getElementById('pairDeviceId');
+const pairDeviceTokenInput = document.getElementById('pairDeviceToken');
+const pairErrorEl = document.getElementById('pairError');
+const pairSubmitBtn = document.getElementById('pairSubmitBtn');
+const pairInfoEl = document.getElementById('pairInfo');
+const pairDeviceName = document.getElementById('pairDeviceName');
+const unpairBtn = document.getElementById('unpairBtn');
+
 const moveButtons = {
     north: document.getElementById('moveNorth'),
     south: document.getElementById('moveSouth'),
@@ -194,6 +213,102 @@ function formatTime(date) {
 function escapeHtml(text) {
     const map = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#039;' };
     return String(text).replace(/[&<>"']/g, (c) => map[c]);
+}
+
+/* ── Device pairing ────────────────────────────────────────── */
+
+function loadPairing() {
+    let id = null;
+    let token = null;
+    try {
+        id = window.localStorage.getItem(BG_DEVICE_ID_KEY);
+        token = window.localStorage.getItem(BG_DEVICE_TOKEN_KEY);
+    } catch (err) {
+        id = null;
+        token = null;
+    }
+    if (id && token && typeof id === 'string' && typeof token === 'string' && id.trim() !== '' && token.trim() !== '') {
+        pairedDeviceId = id.trim();
+        pairedDeviceToken = token.trim();
+    } else {
+        pairedDeviceId = null;
+        pairedDeviceToken = null;
+    }
+    renderPairingState();
+}
+
+function isDevicePaired() {
+    return pairedDeviceId !== null && pairedDeviceToken !== null;
+}
+
+function deviceAuthHeaders() {
+    if (!isDevicePaired()) return {};
+    return {
+        'X-Device-Id': pairedDeviceId,
+        'X-Device-Token': pairedDeviceToken
+    };
+}
+
+function renderPairingState() {
+    const paired = isDevicePaired();
+    if (pairCardEl) pairCardEl.classList.toggle('paired', paired);
+    if (pairChipEl) pairChipEl.classList.toggle('on', paired);
+    if (pairChipTextEl) pairChipTextEl.textContent = paired ? 'Paired' : 'Unpaired';
+    if (pairStatusEl) {
+        pairStatusEl.textContent = paired
+            ? `This phone is linked to ${pairedDeviceId}.`
+            : 'Link this phone with the cap device (BG001).';
+    }
+    if (pairFormEl) pairFormEl.hidden = paired;
+    if (pairInfoEl) pairInfoEl.hidden = !paired;
+    if (pairDeviceName) pairDeviceName.textContent = pairedDeviceId || '—';
+    if (pairErrorEl) pairErrorEl.textContent = '';
+}
+
+function setPairError(message) {
+    if (pairErrorEl) pairErrorEl.textContent = message || '';
+}
+
+function pairDevice() {
+    const id = pairDeviceIdInput ? pairDeviceIdInput.value.trim() : '';
+    const token = pairDeviceTokenInput ? pairDeviceTokenInput.value.trim() : '';
+    setPairError('');
+    if (!id) return setPairError('Enter the device ID, e.g. BG001.');
+    if (!token) return setPairError('Enter the device token from the caretaker console.');
+    try {
+        window.localStorage.setItem(BG_DEVICE_ID_KEY, id);
+        window.localStorage.setItem(BG_DEVICE_TOKEN_KEY, token);
+    } catch (err) {
+        setPairError('Could not save the pairing on this phone.');
+        return;
+    }
+    pairedDeviceId = id;
+    pairedDeviceToken = token;
+    if (pairDeviceIdInput) pairDeviceIdInput.value = '';
+    if (pairDeviceTokenInput) pairDeviceTokenInput.value = '';
+    renderPairingState();
+}
+
+function unpairDevice() {
+    pairedDeviceId = null;
+    pairedDeviceToken = null;
+    try {
+        window.localStorage.removeItem(BG_DEVICE_ID_KEY);
+        window.localStorage.removeItem(BG_DEVICE_TOKEN_KEY);
+    } catch (err) { /* ignore */ }
+    renderPairingState();
+}
+
+// A 401 on any device-authenticated call means the pairing is no longer valid
+// (token rotated or device removed). It only affects the pairing state — the
+// rest of the voice UI keeps running untouched.
+function handleDeviceUnauthorized() {
+    unpairDevice();
+    if (pairCardEl) {
+        pairStatusEl.textContent = 'Pairing was rejected by the backend (401). Pair this phone again with a new token.';
+        pairCardEl.classList.add('error');
+        setTimeout(() => pairCardEl.classList.remove('error'), 6000);
+    }
 }
 
 /* ── Connection status ─────────────────────────────────────── */
@@ -688,7 +803,10 @@ async function executeBuzzerCommand(command) {
     try {
         const response = await fetch(BUZZER_ENDPOINT, {
             method: 'POST',
-            headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
+            headers: Object.assign(
+                { 'Content-Type': 'application/json', 'Accept': 'application/json' },
+                deviceAuthHeaders()
+            ),
             body: JSON.stringify({ command: commandName })
         });
         if (response.ok) {
@@ -697,6 +815,7 @@ async function executeBuzzerCommand(command) {
             updateBuzzerStateUI();
             succeeded = true;
         } else {
+            if (response.status === 401) handleDeviceUnauthorized();
             console.warn('[Voice Command] Buzzer endpoint rejected:', response.status);
         }
     } catch (error) {
@@ -762,11 +881,15 @@ function updateBuzzerStateUI() {
 
 async function fetchBuzzerState() {
     try {
-        const response = await fetch(BUZZER_ENDPOINT, { headers: { 'Accept': 'application/json' } });
+        const response = await fetch(BUZZER_ENDPOINT, {
+            headers: Object.assign({ 'Accept': 'application/json' }, deviceAuthHeaders())
+        });
         if (response.ok) {
             const result = await response.json();
             buzzerState = result.state;
             updateBuzzerStateUI();
+        } else if (response.status === 401) {
+            handleDeviceUnauthorized();
         }
     } catch (error) {
         console.warn('[Blind Client] Failed to fetch buzzer state:', error.message || error);
@@ -1177,11 +1300,15 @@ async function sendSosAlert() {
     try {
         const response = await fetch(EVENTS_ENDPOINT, {
             method: 'POST',
-            headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
+            headers: Object.assign(
+                { 'Content-Type': 'application/json', 'Accept': 'application/json' },
+                deviceAuthHeaders()
+            ),
             body: JSON.stringify(payload)
         });
         alertOk = response.ok;
         if (!alertOk) {
+            if (response.status === 401) handleDeviceUnauthorized();
             throw new Error(`HTTP ${response.status}`);
         }
     } catch (error) {
@@ -1529,11 +1656,17 @@ async function sendWallEMessage(message) {
     try {
         const response = await fetch(WALLE_ENDPOINT, {
             method: 'POST',
-            headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
+            headers: Object.assign(
+                { 'Content-Type': 'application/json', 'Accept': 'application/json' },
+                deviceAuthHeaders()
+            ),
             body: JSON.stringify({ sessionId: walleSessionId, message }),
             signal: controller.signal
         });
-        if (response.status === 503) {
+        if (response.status === 401) {
+            handleDeviceUnauthorized();
+            failType = 'INTERNAL';
+        } else if (response.status === 503) {
             failType = 'UNAVAILABLE';
         } else if (!response.ok) {
             failType = 'INTERNAL';
@@ -1639,10 +1772,14 @@ async function sendLocation(lat, lng) {
     try {
         const response = await fetch(LOCATION_ENDPOINT, {
             method: 'POST',
-            headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
+            headers: Object.assign(
+                { 'Content-Type': 'application/json', 'Accept': 'application/json' },
+                deviceAuthHeaders()
+            ),
             body: JSON.stringify({ latitude: lat, longitude: lng, timestamp })
         });
         if (!response.ok) {
+            if (response.status === 401) handleDeviceUnauthorized();
             throw new Error(`HTTP ${response.status}`);
         }
         updatedValue.textContent = formatTime(new Date());
@@ -1776,10 +1913,14 @@ async function sendCapAlert(lat, lng) {
     try {
         const response = await fetch(EVENTS_ENDPOINT, {
             method: 'POST',
-            headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
+            headers: Object.assign(
+                { 'Content-Type': 'application/json', 'Accept': 'application/json' },
+                deviceAuthHeaders()
+            ),
             body: JSON.stringify(payload)
         });
         if (!response.ok) {
+            if (response.status === 401) handleDeviceUnauthorized();
             throw new Error(`HTTP ${response.status}`);
         }
         return true;
@@ -1877,10 +2018,14 @@ async function sendDemoEvent(direction) {
     try {
         const response = await fetch(EVENTS_ENDPOINT, {
             method: 'POST',
-            headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
+            headers: Object.assign(
+                { 'Content-Type': 'application/json', 'Accept': 'application/json' },
+                deviceAuthHeaders()
+            ),
             body: JSON.stringify(payload)
         });
         if (!response.ok) {
+            if (response.status === 401) handleDeviceUnauthorized();
             throw new Error(`HTTP ${response.status}`);
         }
         const created = await response.json();
@@ -1925,6 +2070,10 @@ confirmSendBtn.addEventListener('click', transitionToSend);
 confirmCancelBtn.addEventListener('click', abortVoiceSos);
 handsfreeToggle.addEventListener('change', toggleHandsFree);
 
+pairSubmitBtn.addEventListener('click', pairDevice);
+unpairBtn.addEventListener('click', unpairDevice);
+
+loadPairing();
 setVoiceState('disabled');
 setConnState('disconnected');
 setBackendStatus(false);

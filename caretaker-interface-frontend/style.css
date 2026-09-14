@@ -1452,6 +1452,108 @@ section[id] { scroll-margin-top: 92px; }
 
 .modal-actions { display: flex; justify-content: flex-end; gap: 0.6rem; }
 
+/* ── Device sidebar (cap devices) ───────────────────────────────────── */
+
+.sidebar-devices {
+    display: flex; flex-direction: column; gap: 0.5rem;
+    padding-top: 0.75rem;
+    border-top: 1px solid var(--line);
+    min-height: 0;
+}
+
+.sidebar-device-list {
+    list-style: none;
+    display: flex; flex-direction: column; gap: 0.3rem;
+    max-height: 26vh;
+    overflow-y: auto;
+    scrollbar-width: thin;
+}
+
+.sidebar-device {
+    display: flex; align-items: center; gap: 0.35rem;
+    padding: 0.45rem 0.5rem;
+    border-radius: var(--r-sm);
+    border: 1px solid var(--line);
+    background: var(--bg-surface);
+    transition: var(--t-fast);
+}
+.sidebar-device:hover { border-color: var(--line-strong); background: var(--bg-surface-alt); }
+
+.sidebar-device-main { display: flex; flex-direction: column; gap: 0.15rem; min-width: 0; flex: 1 1 auto; }
+
+.sidebar-device-meta { display: flex; flex-direction: column; min-width: 0; }
+.sidebar-device-meta b {
+    font-size: 0.8125rem; font-weight: 700; color: var(--text-1);
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.sidebar-device-meta > span {
+    font-size: 0.625rem; color: var(--text-3); font-weight: 500;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+
+.device-status {
+    display: inline-flex; align-items: center; gap: 0.3rem;
+    align-self: flex-start;
+    font-size: 0.5625rem; font-weight: 700; letter-spacing: 0.05em;
+    padding: 0.08rem 0.4rem;
+    border-radius: var(--r-full);
+    border: 1px solid var(--line);
+    background: var(--bg-surface-alt);
+    color: var(--text-2);
+    text-transform: uppercase;
+}
+.device-status-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--text-3); flex-shrink: 0; }
+
+.device-status.online { background: var(--ok-soft); border-color: #bfe3cd; color: var(--ok); }
+.device-status.online .device-status-dot { background: var(--ok); }
+.device-status.offline { background: var(--bg-surface-alt); border-color: var(--line); color: var(--text-3); }
+.device-status.offline .device-status-dot { background: var(--text-3); }
+.device-status.error { background: var(--emergency-soft); border-color: #f0cfc6; color: var(--emergency-strong); }
+.device-status.error .device-status-dot { background: var(--emergency); }
+
+.sidebar-device-seen { font-size: 0.625rem; color: var(--text-3); font-weight: 500; }
+
+.sidebar-device-actions { display: inline-flex; gap: 0.15rem; opacity: 0; transition: opacity var(--t-fast); flex-shrink: 0; }
+.sidebar-device:hover .sidebar-device-actions, .sidebar-device:focus-within .sidebar-device-actions { opacity: 1; }
+.sidebar-device-actions .icon-btn { width: 24px; height: 24px; }
+
+/* ── Token modal ─────────────────────────────────────────────────────── */
+
+.modal-narrow { max-width: 400px; }
+
+.field-hint { font-size: 0.6875rem; color: var(--text-3); font-weight: 500; line-height: 1.45; }
+
+.token-modal-body { display: flex; flex-direction: column; gap: 0.85rem; }
+
+.token-warning {
+    font-size: 0.8125rem; font-weight: 600;
+    color: var(--brand-ink);
+    background: var(--brand-soft);
+    border: 1px solid #eed9b6;
+    border-radius: var(--r-sm);
+    padding: 0.6rem 0.85rem;
+    line-height: 1.45;
+}
+
+.token-code {
+    display: block;
+    font-family: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    font-size: 0.8125rem;
+    background: var(--bg-inset);
+    border: 1px solid var(--line);
+    border-radius: var(--r-sm);
+    padding: 0.75rem 0.9rem;
+    color: var(--text-1);
+    word-break: break-all;
+    user-select: all;
+}
+
+.token-hint { font-size: 0.6875rem; color: var(--text-3); font-weight: 500; line-height: 1.5; }
+
+.token-modal-body .btn { justify-content: center; gap: 0.45rem; }
+.token-modal-body .btn svg { width: 15px; height: 15px; }
+
 @media (hover: none) {
     .sidebar-user-actions { opacity: 1; }
+    .sidebar-device-actions { opacity: 1; }
 }

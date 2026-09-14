@@ -10,6 +10,9 @@ const { getSystemPrompt } = require('./ai/system-prompt');
 const { chatWithFallback } = require('./ai/model-router');
 const { buildTrustedContext } = require('./ai/context-builder');
 const conversationStore = require('./ai/conversation-store');
+const { requireAuth, requireRole, hasActiveRelationship } = require('./auth/middleware');
+const { requireDeviceAuth } = require('./devices/middleware');
+const devicesRouter = require('./devices/routes');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -152,7 +155,7 @@ function validateEvent(event) {
     return null;
 }
 
-function storeLocation(location) {
+function storeLocation(location, device) {
     const error = validateLocation(location);
     if (error) {
         return { ok: false, status: 400, error };
@@ -163,6 +166,12 @@ function storeLocation(location) {
         longitude: location.longitude,
         timestamp: location.timestamp || new Date().toISOString()
     };
+
+    if (device && device.identifier) {
+        stored.deviceId = device.identifier;
+        stored.blindUserId = device.blindUserId;
+    }
+
     latestLocation = stored;
     return { ok: true, location: stored };
 }
@@ -468,8 +477,8 @@ app.get('/api/location', (req, res) => {
     return res.status(200).json({ latitude: null, longitude: null, timestamp: null });
 });
 
-app.post('/api/location', (req, res) => {
-    const result = storeLocation(req.body);
+app.post('/api/location', requireDeviceAuth, (req, res) => {
+    const result = storeLocation(req.body, req.device);
 
     if (!result.ok) {
         return res.status(400).json({ error: result.error });
@@ -478,7 +487,12 @@ app.post('/api/location', (req, res) => {
     return res.status(200).json(result.location);
 });
 
-app.post('/api/events', (req, res) => {
+app.post('/api/events', requireDeviceAuth, (req, res) => {
+    // Identity comes from the authenticated device, never from the request
+    // body. Any client-supplied deviceId/blindUserId is overwritten.
+    req.body.deviceId = req.device.identifier;
+    req.body.blindUserId = req.device.blindUserId;
+
     const result = createEvent(req.body);
 
     if (!result.ok) {
@@ -488,12 +502,44 @@ app.post('/api/events', (req, res) => {
     return res.status(result.status).json(result.event);
 });
 
-app.patch('/api/events/:alertId', (req, res) => {
+// Composite actor for PATCH: a cap device (headers) OR a caretaker session
+// cookie may resolve an alert. The device path enforces event ownership; the
+// caretaker path enforces the Stage-3 relationship when the event is bound to
+// a blind user, and keeps legacy events (no blindUserId) resolvable.
+function requireEventActor(req, res, next) {
+    const hasAnyDeviceHeader = req.headers['x-device-id'] || req.headers['x-device-token'];
+    if (hasAnyDeviceHeader) {
+        return requireDeviceAuth(req, res, next);
+    }
+    requireAuth(req, res, (err) => {
+        if (err) return next(err);
+        return requireRole('CARETAKER')(req, res, next);
+    });
+}
+
+app.patch('/api/events/:alertId', requireEventActor, async (req, res, next) => {
     const alertId = req.params.alertId;
     const event = events.get(alertId);
 
     if (!event) {
         return res.status(404).json({ error: 'Event not found' });
+    }
+
+    if (req.device) {
+        if (event.deviceId !== req.device.identifier) {
+            return res.status(403).json({ error: 'Event belongs to another device' });
+        }
+    } else if (req.auth) {
+        if (event.blindUserId) {
+            try {
+                const allowed = await hasActiveRelationship(req.auth.user.id, event.blindUserId);
+                if (!allowed) {
+                    return res.status(403).json({ error: 'Not authorized to update this event' });
+                }
+            } catch (err) {
+                return next(err);
+            }
+        }
     }
 
     const newStatus = req.body && req.body.status;
@@ -515,7 +561,7 @@ app.patch('/api/events/:alertId', (req, res) => {
     return res.status(200).json(event);
 });
 
-app.post('/api/buzzer', (req, res) => {
+app.post('/api/buzzer', requireDeviceAuth, (req, res) => {
     const command = req.body && req.body.command;
     const state = req.body && req.body.state;
 
@@ -601,7 +647,7 @@ const WALLE_MAX_MESSAGE_LENGTH = (() => {
     return Number.isFinite(raw) && raw > 0 ? raw : 1000;
 })();
 
-app.post('/api/walle/chat', async (req, res) => {
+app.post('/api/walle/chat', requireDeviceAuth, async (req, res) => {
     if (isWalleChatRateLimited(req)) {
         return res.status(429).json({ error: 'Too many requests. Please try again shortly.' });
     }
@@ -626,15 +672,28 @@ app.post('/api/walle/chat', async (req, res) => {
         });
     }
 
+    // Only context that belongs to the authenticated device reaches Wall-E:
+    // its own events plus location/status/heart-rate from the shared device bus.
+    const deviceEvents = new Map();
+    for (const [alertId, event] of events.entries()) {
+        if (event.deviceId === req.device.identifier || event.blindUserId === req.device.blindUserId) {
+            deviceEvents.set(alertId, event);
+        }
+    }
+
     const contextSnapshot = buildTrustedContext({
         latestLocation,
         latestDeviceStatus,
         lastHeartRate,
         latestFall,
         latestBuzzerState,
-        events
+        events: deviceEvents
     });
 
+    conversationStore.ensureSession(sessionId, {
+        deviceId: req.device.identifier,
+        blindUserId: req.device.blindUserId
+    });
     conversationStore.addUserMessage(sessionId, message.trim());
 
     const history = conversationStore.buildModelMessages(sessionId);
@@ -689,6 +748,7 @@ app.get('/api/walle/history/:sessionId', (req, res) => {
 app.use('/api/auth', authRouter);
 app.use('/api/blind-users', blindUsersRouter);
 app.use('/api/caretaker', careRouter);
+app.use('/api/devices', devicesRouter);
 
 app.use((req, res) => {
     res.status(404).json({ error: 'Route not found' });

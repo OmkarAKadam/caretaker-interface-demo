@@ -65,7 +65,7 @@ function getSession(sessionId) {
     return session || null;
 }
 
-function ensureSession(sessionId) {
+function ensureSession(sessionId, meta) {
     if (typeof sessionId !== 'string' || sessionId.trim() === '') {
         return null;
     }
@@ -80,7 +80,9 @@ function ensureSession(sessionId) {
             sessionId,
             startedAt: nowIso(),
             lastActiveAt: nowIso(),
-            turns: []
+            turns: [],
+            deviceId: (meta && meta.deviceId) || null,
+            blindUserId: (meta && meta.blindUserId) || null
         };
         sessions.set(sessionId, session);
         enforceMaxSessions();
@@ -175,7 +177,7 @@ function getSessionTranscript(sessionId) {
     }
     const session = getSession(sessionId);
     if (!session) return null;
-    return {
+    const transcript = {
         sessionId: session.sessionId,
         startedAt: session.startedAt,
         lastActiveAt: session.lastActiveAt,
@@ -191,6 +193,9 @@ function getSessionTranscript(sessionId) {
             return output;
         })
     };
+    if (session.deviceId) transcript.deviceId = session.deviceId;
+    if (session.blindUserId) transcript.blindUserId = session.blindUserId;
+    return transcript;
 }
 
 module.exports = {

@@ -60,6 +60,17 @@
                 <p class="sidebar-users-empty" id="sidebarUsersEmpty" hidden>No monitored users linked yet.</p>
             </div>
 
+            <div class="sidebar-devices" id="sidebarDevicesBlock" hidden>
+                <div class="sidebar-users-head">
+                    <p class="nav-label">Devices</p>
+                    <button class="icon-btn" id="addDevicesBtn" type="button" title="Register a cap device for the selected user" aria-label="Register a cap device">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><line x1="12" y1="5" x2="12" y2="19"></line><line x1="5" y1="12" x2="19" y2="12"></line></svg>
+                    </button>
+                </div>
+                <ul class="sidebar-device-list" id="sidebarDeviceList"></ul>
+                <p class="sidebar-users-empty" id="sidebarDevicesEmpty" hidden>No devices registered for this user.</p>
+            </div>
+
             <div class="sidebar-footer">
                 <div class="foot-cap">
                     <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"></circle><path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3"></path><line x1="12" y1="17" x2="12.01" y2="17"></line></svg>
@@ -507,6 +518,55 @@
                     <button class="btn btn-primary" id="blindUserFormSubmit" type="submit">Save</button>
                 </div>
             </form>
+        </div>
+    </div>
+
+    <div class="modal-backdrop" id="deviceModal" hidden>
+        <div class="modal" role="dialog" aria-modal="true" aria-labelledby="deviceModalTitle">
+            <div class="modal-head">
+                <h3 id="deviceModalTitle">Register Device</h3>
+                <button class="icon-btn" id="deviceModalClose" type="button" aria-label="Close dialog">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg>
+                </button>
+            </div>
+            <form id="deviceForm" novalidate>
+                <label class="field">
+                    <span class="field-label">Device ID</span>
+                    <input type="text" id="deviceIdentifier" class="field-input mono" autocomplete="off" placeholder="BG001" required>
+                    <span class="field-hint">Shown on the cap. Use the identifier printed on the device (e.g. BG001).</span>
+                </label>
+                <label class="field">
+                    <span class="field-label">Friendly name (optional)</span>
+                    <input type="text" id="deviceFriendlyName" class="field-input" autocomplete="off" placeholder="Assistive Cap" >
+                    <span class="field-hint">A human-readable label for the caretaker console.</span>
+                </label>
+                <p class="auth-error" id="deviceFormError"></p>
+                <div class="modal-actions">
+                    <button class="btn btn-outline" id="deviceFormCancel" type="button">Cancel</button>
+                    <button class="btn btn-primary" id="deviceFormSubmit" type="submit">Register Device</button>
+                </div>
+            </form>
+        </div>
+    </div>
+
+    <div class="modal-backdrop" id="tokenModal" hidden>
+        <div class="modal modal-narrow" role="dialog" aria-modal="true" aria-labelledby="tokenModalTitle">
+            <div class="modal-head">
+                <h3 id="tokenModalTitle">Pairing Token</h3>
+                <button class="icon-btn" id="tokenModalClose" type="button" aria-label="Close dialog">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg>
+                </button>
+            </div>
+            <div class="token-modal-body">
+                <p class="token-warning" id="tokenModalWarning">This token is shown only once. Copy it now — it will not be displayed again.</p>
+                <code class="token-code" id="tokenValue"></code>
+                <p class="token-hint">Pair the blind person's phone with this token (Pair Device → Device Token). The token is stored only inside the backend as a one-way hash.</p>
+                <button class="btn btn-primary btn-block" id="copyTokenBtn" type="button">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><rect x="9" y="9" width="13" height="13" rx="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>
+                    Copy Token
+                </button>
+                <button class="btn btn-outline btn-block" id="tokenDoneBtn" type="button">I Saved It</button>
+            </div>
         </div>
     </div>
 

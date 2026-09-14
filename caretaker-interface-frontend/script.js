@@ -1723,9 +1723,13 @@ let selectedBlindUserId = null;
 let blindUserModalMode = 'create';
 let editingBlindUserId = null;
 
+let devicesForSelected = [];
+let pendingToken = null;
+
 const UI_EMAIL_PATTERN = /^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/;
 const UI_ICON_EDIT = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M17 3a2.828 2.828 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5L17 3z"></path></svg>';
 const UI_ICON_UNLINK = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><circle cx="12" cy="12" r="9"></circle><line x1="8" y1="12" x2="16" y2="12"></line></svg>';
+const UI_ICON_ROTATE = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M21 12a9 9 0 1 1-9-9"></path><path d="M21 3v6h-6"></path></svg>';
 
 function startDashboard() {
     renderInitialHistory();
@@ -1871,6 +1875,7 @@ function selectBlindUser(id) {
     selectedBlindUserId = user ? id : null;
     renderBlindUserList();
     renderHeaderIdentity();
+    refreshDevices();
 }
 
 function normalizeSelection() {
@@ -1893,6 +1898,7 @@ async function refreshBlindUsers() {
     normalizeSelection();
     renderBlindUserList();
     renderHeaderIdentity();
+    refreshDevices();
     return true;
 }
 
@@ -1998,6 +2004,241 @@ function confirmUnlinkBlindUser(id) {
         });
 }
 
+function lastSeenLabel(value) {
+    if (!value) return 'Never';
+    const date = new Date(value);
+    if (Number.isNaN(date.getTime())) return 'Never';
+    return date.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit', second: '2-digit', hour12: true });
+}
+
+function deviceStatusClass(status) {
+    if (status === 'ONLINE') return 'online';
+    if (status === 'ERROR') return 'error';
+    return 'offline';
+}
+
+function renderDeviceList() {
+    const blockEl = document.getElementById('sidebarDevicesBlock');
+    const listEl = document.getElementById('sidebarDeviceList');
+    const emptyEl = document.getElementById('sidebarDevicesEmpty');
+    if (!blockEl || !listEl) return;
+
+    const selected = selectedBlindUserId
+        ? authorizedBlindUsers.find(user => user.id === selectedBlindUserId)
+        : null;
+
+    if (!selected) {
+        blockEl.hidden = true;
+        devicesForSelected = [];
+        return;
+    }
+
+    blockEl.hidden = false;
+    listEl.textContent = '';
+    if (emptyEl) emptyEl.hidden = devicesForSelected.length > 0;
+
+    devicesForSelected.forEach((device) => {
+        const item = document.createElement('li');
+        item.className = 'sidebar-device';
+        item.dataset.deviceId = device.id;
+
+        const main = document.createElement('div');
+        main.className = 'sidebar-device-main';
+
+        const meta = document.createElement('span');
+        meta.className = 'sidebar-device-meta';
+
+        const idName = document.createElement('b');
+        idName.className = 'mono';
+        idName.textContent = device.deviceIdentifier;
+
+        const friendly = document.createElement('span');
+        friendly.textContent = device.friendlyName || 'Assistive Cap';
+
+        const badge = document.createElement('span');
+        badge.className = 'device-status ' + deviceStatusClass(device.status || 'OFFLINE');
+        const dot = document.createElement('span');
+        dot.className = 'device-status-dot';
+        badge.appendChild(dot);
+        badge.appendChild(document.createTextNode(device.status || 'OFFLINE'));
+
+        const seen = document.createElement('span');
+        seen.className = 'sidebar-device-seen';
+        seen.textContent = `Last seen ${lastSeenLabel(device.lastSeenAt)}`;
+
+        meta.appendChild(idName);
+        meta.appendChild(friendly);
+        meta.appendChild(badge);
+        meta.appendChild(seen);
+
+        const actions = document.createElement('span');
+        actions.className = 'sidebar-device-actions';
+
+        const rotateBtn = document.createElement('button');
+        rotateBtn.type = 'button';
+        rotateBtn.className = 'icon-btn';
+        rotateBtn.title = 'Rotate pairing token';
+        rotateBtn.setAttribute('aria-label', `Rotate pairing token for ${device.deviceIdentifier}`);
+        rotateBtn.innerHTML = UI_ICON_ROTATE;
+        rotateBtn.addEventListener('click', (event) => {
+            event.stopPropagation();
+            rotateDeviceTokenForSelected(device);
+        });
+
+        actions.appendChild(rotateBtn);
+        main.appendChild(meta);
+        item.appendChild(main);
+        item.appendChild(actions);
+        listEl.appendChild(item);
+    });
+}
+
+async function refreshDevices() {
+    if (!selectedBlindUserId) {
+        devicesForSelected = [];
+        renderDeviceList();
+        return;
+    }
+    try {
+        const data = await fetchDevicesForBlindUser(selectedBlindUserId);
+        devicesForSelected = (data && Array.isArray(data.devices)) ? data.devices : [];
+    } catch (error) {
+        if (handleAuthError(error)) return;
+        if (error && error.status === 404) {
+            devicesForSelected = [];
+        } else {
+            console.warn('[Devices] Failed to refresh device list:', error.message || error);
+            devicesForSelected = [];
+        }
+    }
+    renderDeviceList();
+}
+
+const UI_DEVICE_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:/-]{0,63}$/;
+
+function openDeviceModal() {
+    const modal = document.getElementById('deviceModal');
+    if (!modal) return;
+    setModalError(document.getElementById('deviceFormError'), null);
+    const idEl = document.getElementById('deviceIdentifier');
+    const nameEl = document.getElementById('deviceFriendlyName');
+    if (idEl) idEl.value = '';
+    if (nameEl) nameEl.value = '';
+    modal.hidden = false;
+    if (idEl) idEl.focus();
+}
+
+function closeDeviceModal() {
+    const modal = document.getElementById('deviceModal');
+    if (modal) modal.hidden = true;
+}
+
+async function handleDeviceFormSubmit(event) {
+    event.preventDefault();
+    if (!selectedBlindUserId) return;
+
+    const idEl = document.getElementById('deviceIdentifier');
+    const nameEl = document.getElementById('deviceFriendlyName');
+    const errorEl = document.getElementById('deviceFormError');
+    const submitBtn = document.getElementById('deviceFormSubmit');
+    if (!idEl || !errorEl || !submitBtn) return;
+
+    const identifier = idEl.value.trim();
+    const friendlyName = nameEl.value.trim();
+
+    setModalError(errorEl, null);
+    if (!UI_DEVICE_ID_PATTERN.test(identifier)) {
+        return setModalError(errorEl, 'Device ID must start with a letter or number and use only letters, numbers, dots, underscores, colons, slashes or dashes (max 64 chars).');
+    }
+
+    submitBtn.disabled = true;
+    const originalLabel = submitBtn.textContent;
+    submitBtn.textContent = 'Registering…';
+
+    try {
+        const result = await registerDevice(selectedBlindUserId, identifier, friendlyName ? friendlyName : undefined);
+        closeDeviceModal();
+        await refreshDevices();
+        const token = result && result.token;
+        if (token) {
+            openTokenModal(token, false, identifier);
+        }
+    } catch (error) {
+        if (handleAuthError(error)) return;
+        let message = error.message || 'Could not register the device.';
+        if (error && error.status === 409) message = 'That Device ID is already registered.';
+        if (error && error.status === 404) message = 'The selected user is no longer monitored. Refresh the list.';
+        setModalError(errorEl, message);
+    } finally {
+        submitBtn.disabled = false;
+        submitBtn.textContent = originalLabel;
+    }
+}
+
+function openTokenModal(token, isRotation, deviceIdentifier) {
+    pendingToken = token || null;
+    const modal = document.getElementById('tokenModal');
+    if (!modal) return;
+
+    const titleEl = document.getElementById('tokenModalTitle');
+    if (titleEl) titleEl.textContent = isRotation ? 'New Pairing Token' : 'Pairing Token';
+    const warningEl = document.getElementById('tokenModalWarning');
+    if (warningEl) {
+        warningEl.textContent = (isRotation
+            ? `The previous token for ${deviceIdentifier || 'this device'} is now invalid. `
+            : 'This token is shown only once. ') + 'Copy it now — it will not be displayed again.';
+    }
+    const valueEl = document.getElementById('tokenValue');
+    if (valueEl) valueEl.textContent = token || '';
+    modal.hidden = false;
+}
+
+function closeTokenModal() {
+    const modal = document.getElementById('tokenModal');
+    if (modal) modal.hidden = true;
+    const valueEl = document.getElementById('tokenValue');
+    if (valueEl) valueEl.textContent = '';
+    pendingToken = null;
+}
+
+async function copyPendingToken() {
+    const copyBtn = document.getElementById('copyTokenBtn');
+    if (copyBtn) {
+        const original = copyBtn.innerHTML;
+        copyBtn.textContent = 'Copied';
+        setTimeout(() => { copyBtn.innerHTML = original; }, 1500);
+    }
+    if (pendingToken) {
+        try {
+            await navigator.clipboard.writeText(pendingToken);
+            return;
+        } catch (err) {
+            const valueEl = document.getElementById('tokenValue');
+            if (valueEl) {
+                valueEl.focus();
+                valueEl.select();
+                try { document.execCommand('copy'); } catch (e) { /* ignore */ }
+            }
+        }
+    }
+}
+
+async function rotateDeviceTokenForSelected(device) {
+    const name = device.friendlyName || device.deviceIdentifier || 'this device';
+    if (!window.confirm(`Rotate the pairing token for ${name} (${device.deviceIdentifier})? The token currently used by the blind person's phone will stop working immediately.`)) {
+        return;
+    }
+    try {
+        const result = await rotateDeviceToken(device.id);
+        await refreshDevices();
+        const token = result && result.token;
+        if (token) openTokenModal(token, true, device.deviceIdentifier);
+    } catch (error) {
+        if (handleAuthError(error)) return;
+        window.alert(error.message || 'Could not rotate the token.');
+    }
+}
+
 async function bootDashboard() {
     showAuthOverlay('Checking your session…');
 
@@ -2035,6 +2276,7 @@ async function bootDashboard() {
     renderHeaderIdentity();
     renderBlindUserList();
     normalizeSelection();
+    refreshDevices();
     startDashboard();
 }
 
@@ -2062,6 +2304,24 @@ if (blindUserFormCancelEl) blindUserFormCancelEl.addEventListener('click', close
 
 const blindUserFormEl = document.getElementById('blindUserForm');
 if (blindUserFormEl) blindUserFormEl.addEventListener('submit', handleBlindUserFormSubmit);
+
+const addDevicesBtnEl = document.getElementById('addDevicesBtn');
+if (addDevicesBtnEl) addDevicesBtnEl.addEventListener('click', openDeviceModal);
+
+const deviceModalCloseEl = document.getElementById('deviceModalClose');
+if (deviceModalCloseEl) deviceModalCloseEl.addEventListener('click', closeDeviceModal);
+const deviceFormCancelEl = document.getElementById('deviceFormCancel');
+if (deviceFormCancelEl) deviceFormCancelEl.addEventListener('click', closeDeviceModal);
+
+const deviceFormEl = document.getElementById('deviceForm');
+if (deviceFormEl) deviceFormEl.addEventListener('submit', handleDeviceFormSubmit);
+
+const tokenModalCloseEl = document.getElementById('tokenModalClose');
+if (tokenModalCloseEl) tokenModalCloseEl.addEventListener('click', closeTokenModal);
+const copyTokenBtnEl = document.getElementById('copyTokenBtn');
+if (copyTokenBtnEl) copyTokenBtnEl.addEventListener('click', copyPendingToken);
+const tokenDoneBtnEl = document.getElementById('tokenDoneBtn');
+if (tokenDoneBtnEl) tokenDoneBtnEl.addEventListener('click', closeTokenModal);
 
 const authOverlayRetryEl = document.getElementById('authOverlayRetry');
 if (authOverlayRetryEl) authOverlayRetryEl.addEventListener('click', bootDashboard);

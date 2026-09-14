@@ -76,6 +76,36 @@
                 </div>
             </section>
 
+            <section class="card pair-card" id="pairCard">
+                <div class="pair-head">
+                    <div class="pair-copy">
+                        <h2>Pair Device</h2>
+                        <p id="pairStatus">Link this phone with the cap device (BG001).</p>
+                    </div>
+                    <span class="sim-badge" id="pairChip"><span class="dot"></span><span id="pairChipText">Unpaired</span></span>
+                </div>
+                <div class="pair-body" id="pairForm">
+                    <label class="pair-field">
+                        <span class="pair-label">Device ID</span>
+                        <input type="text" id="pairDeviceId" class="pair-input mono" autocomplete="off" placeholder="BG001" spellcheck="false">
+                    </label>
+                    <label class="pair-field">
+                        <span class="pair-label">Device Token</span>
+                        <input type="password" id="pairDeviceToken" class="pair-input mono" autocomplete="off" placeholder="Paste the one-time token from the caretaker console" spellcheck="false">
+                    </label>
+                    <p class="pair-error" id="pairError" role="alert"></p>
+                    <button class="pair-btn" id="pairSubmitBtn" type="button">Pair Device</button>
+                </div>
+                <div class="pair-body" id="pairInfo" hidden>
+                    <div class="pair-info-row">
+                        <span class="pair-label">Linked device</span>
+                        <span class="pair-value mono" id="pairDeviceName">—</span>
+                    </div>
+                    <p class="pair-note">This phone identifies itself as this device to the backend. The pairing is stored only on this phone. To change it, unpair and pair again with a new token.</p>
+                    <button class="unpair-btn" id="unpairBtn" type="button">Unpair Device</button>
+                </div>
+            </section>
+
             <section class="emergency-section" id="emergencySection">
                 <div class="emergency-card">
                     <div class="emergency-header">

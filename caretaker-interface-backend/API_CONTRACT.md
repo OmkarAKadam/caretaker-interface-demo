@@ -16,11 +16,15 @@ Base URL: `http://localhost:3000`
 |--------|-----------------------|------------------------------------------------|
 | GET    | `/api/health`         | Health check                                   |
 | GET    | `/api/events`         | Retrieve all stored events                     |
-| POST   | `/api/events`         | **Create a new hardware/alert event**          |
-| GET    | `/api/events/stream`  | **SSE stream** — live events broadcast as they are created |
-| PATCH  | `/api/events/:alertId`| Update the status of one event (caretaker-only)|
+| POST   | `/api/events`         | **Create a new hardware/alert event (device auth)** |
+| GET    | `/api/events/stream`  | **SSE stream** — live events broadcast as they are created (public) |
+| PATCH  | `/api/events/:alertId`| Update the status of one event (caretaker or owning device)|
 | GET    | `/api/location`       | Retrieve the latest phone GPS location         |
-| POST   | `/api/location`       | Publish the phone's current GPS location       |
+| POST   | `/api/location`       | Publish the phone's current GPS location (device auth) |
+| GET    | `/api/devices`        | List monitor-cap devices (caretaker auth)      |
+| POST   | `/api/devices`        | Register a device — pairing token returned once (caretaker auth) |
+| GET    | `/api/devices/:id`    | Get one device (caretaker auth)                |
+| POST   | `/api/devices/:id/rotate` | Rotate a device token (caretaker auth)     |
 
 ---
 
@@ -402,7 +406,93 @@ Example JSON the ESP32 would send for a plain SOS press:
    caretaker via `PATCH /api/events/:alertId` — not by the ESP32.
 5. **Event type is encoded in `trigger`, not in the URL.** There are no separate
    `/api/sos`, `/api/heartbeat`, `/api/ultrasonic`, `/api/esp32` endpoints. Use `POST /api/events`.
-6. **No backend authentication is required in this stage.** Not yet implemented.
+6. **The blind client (phone) authenticates as a device; the ESP32 does not yet.**
+   `POST /api/events`, `POST /api/location`, `PATCH /api/events/:alertId`,
+   `POST /api/buzzer` and `POST /api/walle/chat` now require the `X-Device-Id` /
+   `X-Device-Token` headers (see *Device authentication* below). The ESP32 firmware and the
+   MQTT bridge are unchanged this stage; per-device MQTT credentials/ACLs are future
+   hardening.
+
+---
+
+## Device authentication & registration (Stage 4)
+
+Devices (the cap + the blind person's phone) are registered and rotated **exclusively by
+the caretaker**, so there is no self-signup or public creation endpoint.
+
+### Register a device (caretaker session required)
+
+```http
+POST /api/devices
+Cookie: bg_session=<session token>
+Content-Type: application/json
+```
+
+```json
+{
+  "blindUserId": "uuid-of-the-monitored-user",
+  "deviceIdentifier": "BG001",
+  "friendlyName": "Assistive Cap"
+}
+```
+
+`deviceIdentifier` must match `^[A-Za-z0-9][A-Za-z0-9._:/-]{0,63}$`. The blind user must
+have an ACTIVE relationship with the caretaker, otherwise `404`.
+
+- `201 Created` → `{ "device": {…}, "token": "…" }` — the plaintext token appears
+  **exactly once** and is not retrievable afterwards.
+
+```json
+{
+  "device": {
+    "id": "uuid",
+    "blindUserId": "uuid-of-the-monitored-user",
+    "deviceIdentifier": "BG001",
+    "friendlyName": "Assistive Cap",
+    "status": "OFFLINE",
+    "lastSeenAt": null
+  },
+  "token": "JNaSv6X0VpB2kvfhzZb2g3S-UQ4W2ZL5yP_d0vM1sQQ"
+}
+```
+
+- `409` if the identifier is already registered. `401` without a caretaker session.
+- `404` if the caretaker is not linked to `blindUserId`.
+
+### Rotate a device token (caretaker session required)
+
+```http
+POST /api/devices/:id/rotate
+```
+
+Returns `{ "device": {…}, "token": "<new-token>" }`. The previous token is revoked
+immediately. The new token is also returned exactly once.
+
+### List devices (caretaker session required)
+
+| Method | Path | Notes |
+|--------|------|-------|
+| GET | `/api/devices` | All devices the caretaker can see (linked blind users). |
+| GET | `/api/devices?blindUserId=<uuid>` | Filter; `404` if not linked. |
+| GET | `/api/devices/:id` | Single device; `404` if not the caretaker's. |
+
+Every device listing returns the **safe** shape only — `secret_hash` and the token are
+never exposed.
+
+### Authenticated device calls (phone → backend)
+
+```http
+X-Device-Id: <deviceIdentifier>
+X-Device-Token: <43-char base64url token>
+```
+
+- `401` (generic, identical body) for missing/malformed/wrong/unknown credentials.
+- Identity is server-derived: the request body may never override `deviceId` or
+  `blindUserId`.
+- Event `PATCH` requires the event to belong to the authenticated device
+  (`403` otherwise). Caretakers can still update any linked user's events.
+- The SSE feed `/api/events/stream`, `GET /api/location`, `GET /api/events` and
+  `GET /api/health` remain public (caretaker console + voice client).
 
 ---
 

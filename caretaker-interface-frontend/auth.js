@@ -18,6 +18,7 @@ const AUTH_LOGOUT_ENDPOINT = `${AUTH_API_BASE_URL}/api/auth/logout`;
 const AUTH_ME_ENDPOINT = `${AUTH_API_BASE_URL}/api/auth/me`;
 const BLIND_USERS_ENDPOINT = `${AUTH_API_BASE_URL}/api/blind-users`;
 const CARETAKER_BLIND_USERS_ENDPOINT = `${AUTH_API_BASE_URL}/api/caretaker/blind-users`;
+const DEVICES_ENDPOINT = `${AUTH_API_BASE_URL}/api/devices`;
 
 const AUTH_FETCH_INIT = { credentials: 'include' };
 
@@ -118,6 +119,34 @@ async function updateBlindUserIdentity(blindUserId, patch) {
 async function deactivateBlindUserRelationship(blindUserId) {
     return authApiFetch(`${CARETAKER_BLIND_USERS_ENDPOINT}/${encodeURIComponent(blindUserId)}`, {
         method: 'DELETE',
+        headers: { 'Accept': 'application/json' }
+    });
+}
+
+/* ── Device (assistive cap) management ───────────────────────────── */
+
+// GET /api/devices?blindUserId=<uuid> — devices of one linked blind user.
+async function fetchDevicesForBlindUser(blindUserId) {
+    return authApiFetch(`${DEVICES_ENDPOINT}?blindUserId=${encodeURIComponent(blindUserId)}`, {
+        headers: { 'Accept': 'application/json' }
+    });
+}
+
+// POST /api/devices — register a cap device. Resolves { device, token };
+// the token is shown exactly once by the caller.
+async function registerDevice(blindUserId, deviceIdentifier, friendlyName) {
+    return authApiFetch(DEVICES_ENDPOINT, {
+        method: 'POST',
+        headers: { 'Accept': 'application/json' },
+        body: { blindUserId, deviceIdentifier, friendlyName: friendlyName || undefined }
+    });
+}
+
+// POST /api/devices/:deviceId/rotate — replace the pairing secret.
+// Resolves { device, token } with the new one-time token.
+async function rotateDeviceToken(deviceId) {
+    return authApiFetch(`${DEVICES_ENDPOINT}/${encodeURIComponent(deviceId)}/rotate`, {
+        method: 'POST',
         headers: { 'Accept': 'application/json' }
     });
 }
