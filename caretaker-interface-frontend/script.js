@@ -1023,7 +1023,10 @@ function setApiStatus(state) {
 }
 
 async function fetchEventsFromAPI() {
-    const response = await fetch(EVENTS_ENDPOINT, { headers: { 'Accept': 'application/json' }, credentials: 'include' });
+    const endpoint = selectedBlindUserId
+        ? `${EVENTS_ENDPOINT}?blindUserId=${encodeURIComponent(selectedBlindUserId)}`
+        : EVENTS_ENDPOINT;
+    const response = await fetch(endpoint, { headers: { 'Accept': 'application/json' }, credentials: 'include' });
     if (!response.ok) {
         throw new Error(`HTTP ${response.status}`);
     }
@@ -1050,6 +1053,7 @@ async function apiPollLoop(epoch) {
 
     try {
         const events = await fetchEventsFromAPI();
+        if (!isApiPollingRunning || epoch !== apiPollingEpoch) return;
         setApiStatus('connected');
         await receiveEventFromAPI(events);
         await loadWalleSessions();
@@ -1127,7 +1131,10 @@ async function loadWalleSessions() {
         setWalleListState('Loading conversations…', 'Fetching recent Wall-E conversations.');
     }
     try {
-        const response = await fetch(WALLE_SESSIONS_ENDPOINT, { headers: { 'Accept': 'application/json' }, credentials: 'include' });
+        const endpoint = selectedBlindUserId
+            ? `${WALLE_SESSIONS_ENDPOINT}?blindUserId=${encodeURIComponent(selectedBlindUserId)}`
+            : WALLE_SESSIONS_ENDPOINT;
+        const response = await fetch(endpoint, { headers: { 'Accept': 'application/json' }, credentials: 'include' });
         if (!response.ok) {
             throw new Error(`HTTP ${response.status}`);
         }
@@ -1388,13 +1395,22 @@ function createWalleMsg(turn) {
 }
 
 async function fetchLocationFromAPI() {
-    const response = await fetch(LOCATION_ENDPOINT, { headers: { 'Accept': 'application/json' }, credentials: 'include' });
+    const endpoint = selectedBlindUserId
+        ? `${LOCATION_ENDPOINT}?blindUserId=${encodeURIComponent(selectedBlindUserId)}`
+        : LOCATION_ENDPOINT;
+    const response = await fetch(endpoint, { headers: { 'Accept': 'application/json' }, credentials: 'include' });
     if (!response.ok) {
         throw new Error(`HTTP ${response.status}`);
     }
     const data = await response.json();
-    if (typeof data !== 'object' || data === null ||
-        typeof data.latitude !== 'number' || typeof data.longitude !== 'number') {
+    if (typeof data !== 'object' || data === null) {
+        throw new Error('Unexpected location response shape');
+    }
+    // A linked blind user with no location yet returns null/empty coordinates.
+    if (data.latitude === null || data.longitude === null) {
+        return { latitude: null, longitude: null, timestamp: null };
+    }
+    if (typeof data.latitude !== 'number' || typeof data.longitude !== 'number') {
         throw new Error('Unexpected location response shape');
     }
     return data;
@@ -1437,7 +1453,12 @@ async function locationPollLoop(epoch) {
 
     try {
         const location = await fetchLocationFromAPI();
-        handleLocationUpdate(location.latitude, location.longitude, location.timestamp || null);
+        if (!isLocationPollingRunning || epoch !== locationPollingEpoch) return;
+        if (location.latitude === null || location.longitude === null) {
+            clearLocationDisplay();
+        } else {
+            handleLocationUpdate(location.latitude, location.longitude, location.timestamp || null);
+        }
         setLocationStatus('connected');
     } catch (error) {
         console.warn('[Location] Polling failed:', error.message || error);
@@ -1446,6 +1467,28 @@ async function locationPollLoop(epoch) {
 
     if (isLocationPollingRunning && epoch === locationPollingEpoch) {
         locationPollingTimer = setTimeout(() => locationPollLoop(locationPollingEpoch), LOCATION_POLL_INTERVAL);
+    }
+}
+
+// Clears the map marker and location readouts (e.g. switched to a blind user
+// with no location data yet).
+function clearLocationDisplay() {
+    currentLocation = { latitude: null, longitude: null, timestamp: null };
+    const latitudeEl = document.getElementById('latitude');
+    const longitudeEl = document.getElementById('longitude');
+    if (latitudeEl) latitudeEl.textContent = '—';
+    if (longitudeEl) longitudeEl.textContent = '—';
+    const locationTimestampEl = document.getElementById('locationTimestamp');
+    const phoneLastUpdateEl = document.getElementById('phoneLastUpdate');
+    if (locationTimestampEl) locationTimestampEl.textContent = '—';
+    if (phoneLastUpdateEl) phoneLastUpdateEl.textContent = '—';
+    const srcEl = document.getElementById('locationSource');
+    if (srcEl) srcEl.textContent = '—';
+    const srcFooterEl = document.getElementById('locationSourceFooter');
+    if (srcFooterEl) srcFooterEl.textContent = 'No location data yet';
+    if (map && userMarker) {
+        userMarker.remove();
+        userMarker = null;
     }
 }
 
@@ -1871,11 +1914,57 @@ function renderBlindUserList() {
 }
 
 function selectBlindUser(id) {
+    const previous = selectedBlindUserId;
     const user = authorizedBlindUsers.find(item => item.id === id);
     selectedBlindUserId = user ? id : null;
     renderBlindUserList();
     renderHeaderIdentity();
     refreshDevices();
+    if (selectedBlindUserId !== previous && selectedBlindUserId) {
+        switchBlindUserData();
+    }
+}
+
+// Clears the previous user's displayed dashboard data (events, location,
+// Wall-E) and reloads everything for the newly selected blind user.
+function switchBlindUserData() {
+    clearDashboardData();
+    void loadWalleSessions();
+    if (isApiPollingRunning) {
+        apiPollingEpoch += 1;
+        apiPollLoop(apiPollingEpoch);
+    }
+    if (isLocationPollingRunning) {
+        locationPollingEpoch += 1;
+        locationPollLoop(locationPollingEpoch);
+    }
+}
+
+// Resets in-memory + rendered dashboard state for the previous user.
+function clearDashboardData() {
+    alertsById.clear();
+    processedAlertIds.clear();
+    currentAlert = null;
+    selectedAlertId = null;
+    currentLocation = { latitude: null, longitude: null, timestamp: null };
+    walleSessions = [];
+    walleSessionsSignature = '';
+    selectedWalleSessionId = null;
+
+    const historyList = document.getElementById('alertHistoryList');
+    if (historyList) historyList.innerHTML = '';
+
+    const transitEl = document.getElementById('alertHistoryEmpty');
+    if (transitEl) transitEl.classList.add('visible');
+
+    if (map && userMarker) {
+        userMarker.remove();
+        userMarker = null;
+    }
+    clearLocationDisplay();
+    renderWalleSessions();
+    showWalleDetailEmpty();
+    updateHistoryEmptyState();
 }
 
 function normalizeSelection() {
@@ -1887,6 +1976,7 @@ function normalizeSelection() {
 }
 
 async function refreshBlindUsers() {
+    const previous = selectedBlindUserId;
     try {
         const data = await fetchAuthorizedBlindUsers();
         authorizedBlindUsers = (data && Array.isArray(data.blindUsers)) ? data.blindUsers : [];
@@ -1899,6 +1989,13 @@ async function refreshBlindUsers() {
     renderBlindUserList();
     renderHeaderIdentity();
     refreshDevices();
+    if (selectedBlindUserId) {
+        if (selectedBlindUserId !== previous || authorizedBlindUsers.length > 0) {
+            switchBlindUserData();
+        }
+    } else {
+        clearDashboardData();
+    }
     return true;
 }
 
@@ -2278,6 +2375,10 @@ async function bootDashboard() {
     normalizeSelection();
     refreshDevices();
     startDashboard();
+    // With a blind user active, bind the dashboard data to that user.
+    if (selectedBlindUserId) {
+        switchBlindUserData();
+    }
 }
 
 const logoutBtnEl = document.getElementById('logoutBtn');

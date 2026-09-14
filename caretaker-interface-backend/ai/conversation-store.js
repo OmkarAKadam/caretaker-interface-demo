@@ -237,10 +237,11 @@ function buildPreview(session) {
     return '';
 }
 
-function getSessionSummaries() {
+function getSessionSummaries(filter) {
     prune();
     const summaries = [];
     for (const session of sessions.values()) {
+        if (filter && filter.blindUserId && session.blindUserId !== filter.blindUserId) continue;
         summaries.push({
             sessionId: session.sessionId,
             startedAt: session.startedAt,

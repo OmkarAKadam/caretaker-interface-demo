@@ -37,16 +37,37 @@ The port is configurable via the `PORT` environment variable (defaults to `3000`
 | Method | Path                  | Purpose                                   |
 |--------|-----------------------|-------------------------------------------|
 | GET    | `/api/health`         | Health check (public)                     |
-| GET    | `/api/events`         | Retrieve stored events (public, bounded to `EVENTS_WINDOW_MAX`) |
+| GET    | `/api/events`         | Retrieve stored events (public, bounded to `EVENTS_WINDOW_MAX`); `?blindUserId=` scoping for caretakers |
 | POST   | `/api/events`         | Create a new event (**device auth**)      |
 | PATCH  | `/api/events/:alertId`| Update one event's status (**device or caretaker auth**) |
-| GET    | `/api/location`       | Retrieve the latest phone GPS location (public) |
+| GET    | `/api/location`       | Retrieve the latest phone GPS location (public); `?blindUserId=` scoping for caretakers |
 | POST   | `/api/location`       | Publish the phone's current GPS location (**device auth**) |
 | GET    | `/api/events/stream`  | SSE live feed (public)                    |
 | GET    | `/api/devices`        | List monitor-cap devices (**caretaker auth**) |
 | POST   | `/api/devices`        | Register a device, returns its pairing token once (**caretaker auth**) |
 | GET    | `/api/devices/:id`    | Get one device (**caretaker auth**)       |
 | POST   | `/api/devices/:id/rotate` | Rotate a device's token, returns the new token once (**caretaker auth**) |
+
+### Multi-user dashboard scoping (Stage 6)
+
+The caretaker dashboard is multi-user: a caretaker selects one of their monitored blind
+users and the console shows **only that user's** events, location/state, devices and
+Wall-E conversations. This is enforced on the backend:
+
+- `GET /api/events`, `GET /api/location` and `GET /api/walle/sessions` accept an optional
+  `?blindUserId=<uuid>`. When present, the caller must hold a **CARETAKER** session cookie
+  **and** an ACTIVE relationship to that blind user, otherwise they get `401`/`403`/`404`.
+  The response is strictly limited to that user. Without the parameter the endpoints keep
+  their pre-existing public "latest overall" behavior (backward compatible).
+- `GET /api/walle/history/:sessionId` is now **caretaker-authorized only**: a session bound
+  to a monitored blind user returns `200`; everything else (no cookie, wrong role,
+  unlinked user, unbound or missing session) is `401`/`403`/`404` and never leaks
+  whether a session exists.
+- MQTT-created events are bound to the registered device owner at persistence time: a
+  cap's SOS/radar/heart-rate event carries the device identifier, the backend resolves
+  it to the device's registered blind user, and the event appears in that user's scoped
+  events. An **unknown** MQTT device identifier is never attached to any user — it stays
+  unbound and appears only in the unscoped view.
 
 See `API_CONTRACT.md` for the full request/response contract.
 
@@ -145,6 +166,7 @@ npm run test:auth      # Stage 2 — caretaker accounts & sessions
 npm run test:stage3    # Stage 3 — monitored users & caretaker authorization
 npm run test:stage4    # Stage 4 — device pairing & blind-client authentication
 npm run test:stage5    # Stage 5 — telemetry persistence & boot rehydration
+npm run test:stage6    # Stage 6 — multi-user dashboard scoping & isolation
 ```
 
 ## MQTT (optional)

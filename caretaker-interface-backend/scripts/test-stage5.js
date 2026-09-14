@@ -449,8 +449,10 @@ async function testWalleRehydrate() {
     assertStatus('K7 GET /api/walle/sessions 200', res.status, 200);
     check('K8 rehydrated session listed', Array.isArray(res.body) && res.body.some((s) => s.sessionId === 'stg5-w1'), JSON.stringify(res.body));
 
+    // Stage 6: /api/walle/history is now caretaker-authorized, so an
+    // unauthenticated GET must be rejected (401) instead of public-200.
     const history = await httpJson('GET', '/api/walle/history/stg5-w1');
-    assertStatus('K9 GET /api/walle/history 200', history.status, 200);
+    assertStatus('K9 GET /api/walle/history unauth 401 (Stage-6 gate)', history.status, 401);
 }
 
 async function testPendingSessionsAfterRestart() {

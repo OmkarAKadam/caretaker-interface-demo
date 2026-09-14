@@ -15,11 +15,11 @@ Base URL: `http://localhost:3000`
 | Method | Path                  | Purpose                                        |
 |--------|-----------------------|------------------------------------------------|
 | GET    | `/api/health`         | Health check                                   |
-| GET    | `/api/events`         | Retrieve stored events (public; most recent `EVENTS_WINDOW_MAX`, default 100) |
+| GET    | `/api/events`         | Retrieve stored events (public; most recent `EVENTS_WINDOW_MAX`, default 100) — optional `?blindUserId=` scoping for caretakers |
 | POST   | `/api/events`         | **Create a new hardware/alert event (device auth)** |
 | GET    | `/api/events/stream`  | **SSE stream** — live events broadcast as they are created (public) |
 | PATCH  | `/api/events/:alertId`| Update the status of one event (caretaker or owning device)|
-| GET    | `/api/location`       | Retrieve the latest phone GPS location         |
+| GET    | `/api/location`       | Retrieve the latest phone GPS location — optional `?blindUserId=` scoping for caretakers |
 | POST   | `/api/location`       | Publish the phone's current GPS location (device auth) |
 | GET    | `/api/devices`        | List monitor-cap devices (caretaker auth)      |
 | POST   | `/api/devices`        | Register a device — pairing token returned once (caretaker auth) |
@@ -94,7 +94,15 @@ Returns `200 OK` with the stored location. Invalid data returns `400 Bad Request
 
 ### GET /api/location — retrieve latest phone GPS
 
-Returns the latest published location:
+Returns the latest published location. With the optional `?blindUserId=<uuid>` query the
+caller must be an authenticated **CARETAKER** whose relationship to that blind user is
+**ACTIVE**; the response then only ever contains that user's location (or `null`
+placeholders when none has been received for them):
+
+```http
+GET /api/location                # legacy: latest location across all users (public)
+GET /api/location?blindUserId=<uuid>   # caretaker-only, single blind user
+```
 
 ```json
 {
@@ -114,7 +122,10 @@ If no location has been received yet:
 }
 ```
 
-No fake GPS coordinates are ever generated or returned.
+> The backing store keeps a single system-wide latest location (single-row
+> `latest_states`), so after another user posts a new location the previous user's
+> scoped read returns the `null` placeholders above. No fake GPS coordinates are ever
+> generated or returned.
 
 ---
 
@@ -491,8 +502,14 @@ X-Device-Token: <43-char base64url token>
   `blindUserId`.
 - Event `PATCH` requires the event to belong to the authenticated device
   (`403` otherwise). Caretakers can still update any linked user's events.
-- The SSE feed `/api/events/stream`, `GET /api/location`, `GET /api/events` and
-  `GET /api/health` remain public (caretaker console + voice client).
+- The SSE feed `/api/events/stream`, `GET /api/health` and the **unscoped** forms of
+  `GET /api/location`, `GET /api/events` and `GET /api/walle/sessions` remain public
+  (caretaker console + voice client). Whenever a `?blindUserId=` filter is supplied on
+  those GET endpoints, they become **caretaker-authorized and strictly per-user** (Stage 6).
+- MQTT-created events (which arrive with only a device identifier) are resolved to a
+  blind user at persistence time via the device's registered owner, so a caretaker's
+  scoped event feed includes their monitored cap's MQTT events. An **unregistered** MQTT
+  device identifier is never bound to a blind user and never appears in a scoped view.
 
 ---
 
@@ -583,10 +600,14 @@ database they remain in-memory only. The in-memory retention limits still apply
 #### GET /api/walle/sessions
 
 Returns a JSON array of session summaries, newest/most-recently-active first. Sensor or
-trusted-context data is **never** included.
+trusted-context data is **never** included. With the optional `?blindUserId=<uuid>` query
+the caller must be an authenticated **CARETAKER** whose relationship to that blind user is
+**ACTIVE**; the response then contains only that user's sessions. Without the parameter the
+legacy unscoped (public) listing is returned.
 
 ```http
-GET /api/walle/sessions
+GET /api/walle/sessions                  # legacy: all retained sessions (public)
+GET /api/walle/sessions?blindUserId=<uuid>   # caretaker-only, single blind user
 ```
 
 Response — `200 OK`:
@@ -613,8 +634,12 @@ Response — `200 OK`:
 
 #### GET /api/walle/history/:sessionId
 
-Returns the retained transcript for one session. The session must exist and be within its
-TTL; otherwise `404`. Requesting history **never creates** a session.
+Returns the retained transcript for one session. The caller must be an authenticated
+**CARETAKER** with an **ACTIVE** relationship to the blind user the session belongs to.
+Unauthenticated → `401`; non-caretaker role → `403`; a non-existent session, a session not
+bound to any blind user, or a session bound to a blind user the caretaker does not monitor
+all return `404` (indistinguishable, so nothing leaks). Requesting history **never creates**
+a session.
 
 ```http
 GET /api/walle/history/blind-session-001

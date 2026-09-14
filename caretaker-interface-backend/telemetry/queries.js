@@ -18,7 +18,7 @@ const { isValidUuid } = require('../auth/password');
 // "BG001") and blind-user identity as the *user-UUID string*. These resolvers
 // map those strings to their UUID FK targets so the existing UUID columns can
 // be populated for joins. Unknown identities resolve to NULL — they never
-// grant anything (an unknown MQTT deviceId is only an informational hint).
+// grant anything (an unknown MQTT deviceId is never attached to a user).
 
 const DEVICE_UUID_CACHE_MAX = 256;
 const deviceUuidCache = new Map();
@@ -76,11 +76,26 @@ async function resolveDeviceIdentifier(uuid) {
 // Maps the in-memory event object to its database row. UUID FKs are resolved
 // for safe joins; the string identifiers are always preserved too. heart_rate
 // is clamped to the events table's INTEGER CHECK range (0..400).
+//
+// MQTT-created events carry only the *device identifier* and no blind-user
+// identity. When that device belongs to a registered earbud/cap record, the
+// event is bound to the device's owner (blind_user_id) so scoped caretaker
+// views (GET /api/events?blindUserId=...) include it. An unknown device
+// identifier resolves to NULL and the event stays unbound — identity is never
+// invented from an unregistered deviceId.
 async function mapEventForInsert(event) {
-    const [deviceId, blindUserId] = await Promise.all([
-        resolveDeviceUuid(event.deviceId || null),
-        resolveBlindUserUuid(event.blindUserId || null)
-    ]);
+    const deviceId = await resolveDeviceUuid(event.deviceId || null);
+    let blindUserId = await resolveBlindUserUuid(event.blindUserId || null);
+
+    if (!blindUserId && deviceId) {
+        const owner = await query(
+            `SELECT blind_user_id FROM devices WHERE id = $1`,
+            [deviceId]
+        );
+        if (owner.rows.length && owner.rows[0].blind_user_id) {
+            blindUserId = owner.rows[0].blind_user_id;
+        }
+    }
 
     const heartRate = (() => {
         const hr = event.heartRate;
@@ -94,7 +109,7 @@ async function mapEventForInsert(event) {
         alertId: event.alertId,
         blindUserId,
         deviceId,
-        blindUserIdentifier: event.blindUserId || null,
+        blindUserIdentifier: event.blindUserId || blindUserId || null,
         deviceIdentifier: event.deviceId || null,
         trigger: event.trigger,
         status: event.status,
@@ -178,6 +193,19 @@ async function listRecentEvents(limit) {
          ORDER BY occurred_at DESC, created_at DESC
          LIMIT $1`,
         [limit]
+    );
+    return result.rows.slice().reverse().map(rowToEvent);
+}
+
+// Stage 6: scoped variant — only events belonging to a specific blind user.
+async function listRecentEventsForBlindUser(blindUserId, limit) {
+    const result = await query(
+        `SELECT ${EVENT_SELECT_COLUMNS}
+         FROM events
+         WHERE blind_user_identifier = $1
+         ORDER BY occurred_at DESC, created_at DESC
+         LIMIT $2`,
+        [blindUserId, limit]
     );
     return result.rows.slice().reverse().map(rowToEvent);
 }
@@ -363,5 +391,6 @@ module.exports = {
     listWallTurnTimestamps,
     insertWallMessage,
     listWallTurns,
-    listWallSessions
+    listWallSessions,
+    listRecentEventsForBlindUser
 };

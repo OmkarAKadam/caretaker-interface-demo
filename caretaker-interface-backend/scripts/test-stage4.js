@@ -389,8 +389,11 @@ async function runTests() {
 
 async function cleanup() {
     try {
+        // events.blind_user_id is ON DELETE SET NULL, so DELETE users alone would
+        // orphan this suite's S4-EVT-* rows and make the next run 409-collide.
+        await query(`DELETE FROM events WHERE alert_id LIKE 'S4-EVT-%'`);
         await query(`DELETE FROM users WHERE email LIKE 'stg4-%'`);
-        console.log('[test] cleaned up stg4 users, devices, relationships and sessions');
+        console.log('[test] cleaned up stg4 users, devices, relationships, sessions and events');
         const leftover = await query(`SELECT COUNT(*)::int AS n FROM users WHERE email LIKE 'stg4-%' OR email LIKE 'stg3-%' OR email LIKE 'auth-test-%'`);
         console.log(`[test] leftover test users: ${leftover.rows[0].n}`);
     } catch (err) {

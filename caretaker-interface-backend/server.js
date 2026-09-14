@@ -10,7 +10,9 @@ const { getSystemPrompt } = require('./ai/system-prompt');
 const { chatWithFallback } = require('./ai/model-router');
 const { buildTrustedContext } = require('./ai/context-builder');
 const conversationStore = require('./ai/conversation-store');
-const { requireAuth, requireRole, hasActiveRelationship } = require('./auth/middleware');
+const { requireAuth, requireRole, hasActiveRelationship, SESSION_COOKIE_NAME } = require('./auth/middleware');
+const { hashSessionToken, findSessionByTokenHash } = require('./auth/sessions');
+const { isValidUuid } = require('./auth/password');
 const { requireDeviceAuth } = require('./devices/middleware');
 const devicesRouter = require('./devices/routes');
 const queries = require('./telemetry/queries');
@@ -110,6 +112,13 @@ const persistenceQueue = createPersistenceQueue({
 async function persistEventBestEffort(event) {
     try {
         const mapped = await queries.mapEventForInsert(event);
+        // MQTT events arrive with no blind-user identity; persistence resolves
+        // one from their registered device. Back-fill the same (in-memory)
+        // object — it is also the live `events` Map entry — so scoped memory
+        // fallback and Wall-E context agree with the persisted row.
+        if (mapped && mapped.blindUserIdentifier && !event.blindUserId) {
+            event.blindUserId = mapped.blindUserIdentifier;
+        }
         try {
             await queries.insertEvent(mapped);
         } catch (dbErr) {
@@ -557,6 +566,52 @@ function publishBuzzerCommand(command) {
     return published;
 }
 
+// ── Stage 6 multi-user scoping helper ───────────────────────────────────
+// When a `blindUserId` query parameter is supplied, validates the caller is
+// an authenticated CARETAKER with an ACTIVE relationship to that blind user.
+// Returns the validated blindUserId string on success; on failure, sends the
+// appropriate error response and returns null.  When the parameter is absent
+// the helper returns undefined — the caller should fall back to unscoped
+// (backward-compatible) behavior.
+async function requireScopedBlindUser(req, res) {
+    const blindUserId = req.query.blindUserId;
+    if (blindUserId === undefined || blindUserId === null || blindUserId === '') {
+        return undefined; // no scoping requested — backward-compatible
+    }
+    if (!isValidUuid(blindUserId)) {
+        res.status(404).json({ error: 'Blind user not found' });
+        return null;
+    }
+    // Authenticate via session cookie (replicates requireAuth logic inline
+    // to avoid the next()-after-response issue with Express middleware).
+    const rawToken = req.cookies ? req.cookies[SESSION_COOKIE_NAME] : undefined;
+    if (!rawToken || typeof rawToken !== 'string') {
+        res.status(401).json({ error: 'Not authenticated' });
+        return null;
+    }
+    let session;
+    try {
+        session = await findSessionByTokenHash(hashSessionToken(rawToken));
+    } catch (_err) {
+        res.status(401).json({ error: 'Not authenticated' });
+        return null;
+    }
+    if (!session) {
+        res.status(401).json({ error: 'Not authenticated' });
+        return null;
+    }
+    if (session.role !== 'CARETAKER') {
+        res.status(403).json({ error: 'Forbidden' });
+        return null;
+    }
+    const allowed = await hasActiveRelationship(session.id, blindUserId);
+    if (!allowed) {
+        res.status(404).json({ error: 'Blind user not found' });
+        return null;
+    }
+    return blindUserId;
+}
+
 app.get('/api/health', (req, res) => {
     res.status(200).json({
         status: 'ok',
@@ -566,27 +621,64 @@ app.get('/api/health', (req, res) => {
 });
 
 app.get('/api/events', async (req, res, next) => {
+    let blindUserId;
     try {
-        const recent = await queries.listRecentEvents(EVENTS_WINDOW_MAX);
-        // A fresh database with a live in-memory window (e.g. right after the
-        // first write ever) serves whichever is non-empty. Both are bounded.
-        if (recent.length === 0 && events.size > 0) {
-            return res.status(200).json(Array.from(events.values()).slice(-EVENTS_WINDOW_MAX));
-        }
-        return res.status(200).json(recent);
+        blindUserId = await requireScopedBlindUser(req, res);
+        if (blindUserId === null) return; // error already sent
     } catch (err) {
-        // Database unavailable — serve the bounded in-memory window instead,
-        // preserving the previous (Stage 1–4) contract of a 200 response.
+        // Auth itself depends on the database; when it is unreachable there is
+        // no way to authorize scoping, so fail closed rather than fall back.
+        return next(err);
+    }
+
+    let rows;
+    try {
+        if (blindUserId !== undefined) {
+            // Scoped: only events belonging to the authorized blind user.
+            rows = await queries.listRecentEventsForBlindUser(blindUserId, EVENTS_WINDOW_MAX);
+        } else {
+            // Unscoped (backward-compatible).
+            rows = await queries.listRecentEvents(EVENTS_WINDOW_MAX);
+        }
+    } catch (err) {
         console.warn('[Persistence] GET /api/events fell back to memory:', err && err.message ? err.message : err);
+        if (blindUserId !== undefined) {
+            // DB down + already authorized: in-memory fallback stays scoped.
+            const mem = Array.from(events.values()).filter((e) => e.blindUserId === blindUserId);
+            return res.status(200).json(mem.slice(-EVENTS_WINDOW_MAX));
+        }
         return res.status(200).json(Array.from(events.values()).slice(-EVENTS_WINDOW_MAX));
     }
+
+    if (rows.length === 0 && events.size > 0) {
+        const mem = blindUserId !== undefined
+            ? Array.from(events.values()).filter((e) => e.blindUserId === blindUserId)
+            : Array.from(events.values());
+        if (mem.length > 0) {
+            return res.status(200).json(mem.slice(-EVENTS_WINDOW_MAX));
+        }
+    }
+    return res.status(200).json(rows);
 });
 
-app.get('/api/location', (req, res) => {
-    if (latestLocation) {
-        return res.status(200).json(latestLocation);
+app.get('/api/location', async (req, res, next) => {
+    try {
+        const blindUserId = await requireScopedBlindUser(req, res);
+        if (blindUserId === null) return;
+        if (blindUserId !== undefined) {
+            if (latestLocation && latestLocation.blindUserId === blindUserId) {
+                return res.status(200).json(latestLocation);
+            }
+            return res.status(200).json({ latitude: null, longitude: null, timestamp: null });
+        }
+        // Unscoped (backward-compatible).
+        if (latestLocation) {
+            return res.status(200).json(latestLocation);
+        }
+        return res.status(200).json({ latitude: null, longitude: null, timestamp: null });
+    } catch (err) {
+        return next(err);
     }
-    return res.status(200).json({ latitude: null, longitude: null, timestamp: null });
 });
 
 app.post('/api/location', requireDeviceAuth, (req, res) => {
@@ -859,20 +951,54 @@ app.post('/api/walle/chat', requireDeviceAuth, async (req, res) => {
     }
 });
 
-app.get('/api/walle/sessions', (req, res) => {
-    return res.status(200).json(conversationStore.getSessionSummaries());
+app.get('/api/walle/sessions', async (req, res, next) => {
+    try {
+        const blindUserId = await requireScopedBlindUser(req, res);
+        if (blindUserId === null) return;
+        if (blindUserId !== undefined) {
+            return res.status(200).json(conversationStore.getSessionSummaries({ blindUserId }));
+        }
+        return res.status(200).json(conversationStore.getSessionSummaries());
+    } catch (err) {
+        return next(err);
+    }
 });
 
-app.get('/api/walle/history/:sessionId', (req, res) => {
-    const sessionId = req.params.sessionId;
-    if (!isValidWalleSessionId(sessionId)) {
-        return res.status(404).json({ error: 'Session not found' });
+app.get('/api/walle/history/:sessionId', async (req, res, next) => {
+    try {
+        const sessionId = req.params.sessionId;
+        if (!isValidWalleSessionId(sessionId)) {
+            return res.status(404).json({ error: 'Session not found' });
+        }
+
+        // Require an authenticated CARETAKER via the session cookie.
+        const rawToken = req.cookies ? req.cookies[SESSION_COOKIE_NAME] : undefined;
+        if (!rawToken || typeof rawToken !== 'string') {
+            return res.status(401).json({ error: 'Not authenticated' });
+        }
+        const session = await findSessionByTokenHash(hashSessionToken(rawToken));
+        if (!session) {
+            return res.status(401).json({ error: 'Not authenticated' });
+        }
+        if (session.role !== 'CARETAKER') {
+            return res.status(403).json({ error: 'Forbidden' });
+        }
+
+        const transcript = conversationStore.getSessionTranscript(sessionId);
+        // A session exists but is unbound to a blind user, or does not exist at
+        // all: both are indistinguishable (404) so nothing leaks.
+        if (!transcript || !transcript.blindUserId) {
+            return res.status(404).json({ error: 'Session not found' });
+        }
+
+        const allowed = await hasActiveRelationship(session.id, transcript.blindUserId);
+        if (!allowed) {
+            return res.status(404).json({ error: 'Session not found' });
+        }
+        return res.status(200).json(transcript);
+    } catch (err) {
+        return next(err);
     }
-    const transcript = conversationStore.getSessionTranscript(sessionId);
-    if (!transcript) {
-        return res.status(404).json({ error: 'Session not found' });
-    }
-    return res.status(200).json(transcript);
 });
 
 app.use('/api/auth', authRouter);
