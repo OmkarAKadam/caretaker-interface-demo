@@ -12,7 +12,8 @@
     "test:stage3": "node --env-file-if-exists=.env scripts/test-stage3.js",
     "test:stage4": "node --env-file-if-exists=.env scripts/test-stage4.js",
     "test:stage5": "node --env-file-if-exists=.env scripts/test-stage5.js",
-    "test:stage6": "node --env-file-if-exists=.env scripts/test-stage6.js"
+    "test:stage6": "node --env-file-if-exists=.env scripts/test-stage6.js",
+    "test:stage8a": "node --env-file-if-exists=.env scripts/test-stage8a.js"
   },
   "license": "UNLICENSED",
   "private": true,

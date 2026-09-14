@@ -260,7 +260,7 @@ async function runTests() {
     res = await getJson(`${BASE_URL}/api/events`);
     assertStatus('regression: /api/events 200', res.status, 200);
     res = await getJson(`${BASE_URL}/api/walle/sessions`);
-    assertStatus('regression: /api/walle/sessions 200', res.status, 200);
+    assertStatus('regression: /api/walle/sessions unauth 401 (Stage-8A gate)', res.status, 401);
 }
 
 async function cleanup() {

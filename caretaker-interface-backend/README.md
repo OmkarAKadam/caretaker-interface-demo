@@ -57,8 +57,17 @@ Wall-E conversations. This is enforced on the backend:
 - `GET /api/events`, `GET /api/location` and `GET /api/walle/sessions` accept an optional
   `?blindUserId=<uuid>`. When present, the caller must hold a **CARETAKER** session cookie
   **and** an ACTIVE relationship to that blind user, otherwise they get `401`/`403`/`404`.
-  The response is strictly limited to that user. Without the parameter the endpoints keep
-  their pre-existing public "latest overall" behavior (backward compatible).
+  The response is strictly limited to that user. Without the parameter, `GET /api/events`
+  and `GET /api/location` keep their pre-existing public "latest overall" behavior.
+- The **unscoped** form of `GET /api/walle/sessions` is now **caretaker-authorized only**
+  (Stage 8A): it requires a valid **CARETAKER** session cookie (`401` anonymous, `403`
+  non-caretaker) and returns the full listing. It is no longer public, so session
+  summaries/previews are not exposed to anonymous callers.
+- `POST /api/walle/chat` enforces **session ownership** (Stage 8A): a device may only
+  continue a Wall-E session bound to its own device identifier and blind user, and a new
+  session is always bound to the authenticated device (never to client-supplied identity).
+  Any mismatch answers `404 "Session not found"` so another user's session existence or
+  transcript is never leaked to a different device.
 - `GET /api/walle/history/:sessionId` is now **caretaker-authorized only**: a session bound
   to a monitored blind user returns `200`; everything else (no cookie, wrong role,
   unlinked user, unbound or missing session) is `401`/`403`/`404` and never leaks

@@ -446,8 +446,25 @@ async function testWalleRehydrate() {
     }
 
     const res = await httpJson('GET', '/api/walle/sessions');
-    assertStatus('K7 GET /api/walle/sessions 200', res.status, 200);
-    check('K8 rehydrated session listed', Array.isArray(res.body) && res.body.some((s) => s.sessionId === 'stg5-w1'), JSON.stringify(res.body));
+    assertStatus('K7 GET /api/walle/sessions unauth 401 (Stage-8A gate)', res.status, 401);
+
+    // The unscoped listing is now caretaker-authorized, so log in as one to
+    // verify the rehydrated session appears (K8).
+    const caretakerEmail = `${PREFIX}${ts}-k@test.local`;
+    await query(
+        `INSERT INTO users (name, email, password_hash, role)
+         VALUES ($1, $2, $3, 'CARETAKER')`,
+        ['Stage5 Observing Caretaker', caretakerEmail, await hashPassword('CorrectHorse42!')]
+    );
+    const loginRes = await httpJson('POST', '/api/auth/login', { email: caretakerEmail, password: 'CorrectHorse42!' });
+    assertStatus('K7 caretaker fixture logs in', loginRes.status, 200);
+    const loginCookie = (loginRes.headers.getSetCookie() || []).find((h) => h.split(';')[0].startsWith('bg_session='));
+    const caretakerCookie = loginCookie ? loginCookie.split(';')[0].split('=').slice(1).join('=') : null;
+    check('K7 caretaker cookie captured', Boolean(caretakerCookie));
+
+    const sessionsRes = await httpJson('GET', '/api/walle/sessions', undefined, { Cookie: `bg_session=${caretakerCookie}` });
+    assertStatus('K8 GET /api/walle/sessions caretaker 200', sessionsRes.status, 200);
+    check('K8 rehydrated session listed', Array.isArray(sessionsRes.body) && sessionsRes.body.some((s) => s.sessionId === 'stg5-w1'), JSON.stringify(sessionsRes.body));
 
     // Stage 6: /api/walle/history is now caretaker-authorized, so an
     // unauthenticated GET must be rejected (401) instead of public-200.

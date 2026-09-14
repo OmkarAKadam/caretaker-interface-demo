@@ -225,6 +225,7 @@ The ESP32 reports a hardware event by `POST`-ing JSON to this endpoint.
 | `latitude`  | number          | no*      | Between `-90` and `90`. *Optional if a phone location is available (enrichment); required otherwise. |
 | `longitude` | number          | no*      | Between `-180` and `180`. *Optional if a phone location is available (enrichment); required otherwise. |
 | `timestamp` | string (ISO-8601) | yes   | Must be a valid date/time string.                  |
+| `message`   | string          | no       | Free-text note/gravity message. Max **256 characters** (`EVENT_MESSAGE_MAX`); longer messages are rejected with `400` on both the REST and MQTT entry points. |
 
 ### Supported `trigger` values
 
@@ -503,9 +504,13 @@ X-Device-Token: <43-char base64url token>
 - Event `PATCH` requires the event to belong to the authenticated device
   (`403` otherwise). Caretakers can still update any linked user's events.
 - The SSE feed `/api/events/stream`, `GET /api/health` and the **unscoped** forms of
-  `GET /api/location`, `GET /api/events` and `GET /api/walle/sessions` remain public
-  (caretaker console + voice client). Whenever a `?blindUserId=` filter is supplied on
-  those GET endpoints, they become **caretaker-authorized and strictly per-user** (Stage 6).
+  `GET /api/location` and `GET /api/events` remain public (caretaker console + voice client).
+  Whenever a `?blindUserId=` filter is supplied on those GET endpoints, they become
+  **caretaker-authorized and strictly per-user** (Stage 6).
+- The **unscoped** form of `GET /api/walle/sessions` is **caretaker-authorized** (Stage 8A):
+  unauthenticated → `401`, non-caretaker session → `403`; authenticated CARETAKER → `200`
+  with the full listing. The `?blindUserId=` form keeps its Stage 6 rules (caretaker +
+  ACTIVE relationship, `404` otherwise).
 - MQTT-created events (which arrive with only a device identifier) are resolved to a
   blind user at persistence time via the device's registered owner, so a caretaker's
   scoped event feed includes their monitored cap's MQTT events. An **unregistered** MQTT
@@ -580,6 +585,7 @@ Content-Type: application/json
 | Code | Meaning                  | Body example                                                |
 |------|--------------------------|-------------------------------------------------------------|
 | 400  | Missing/empty `sessionId` or `message`, or message too long | `{ "error": "message is required" }` |
+| 404  | Unknown `sessionId`, or the session belongs to a different device/blind user | `{ "error": "Session not found" }` |
 | 503  | All AI models failed     | `{ "error": "AI_PROVIDER_UNAVAILABLE", "message": "AI service temporarily unavailable" }` |
 | 500  | Unexpected server error  | `{ "error": "Internal server error" }`                      |
 
@@ -600,15 +606,23 @@ database they remain in-memory only. The in-memory retention limits still apply
 #### GET /api/walle/sessions
 
 Returns a JSON array of session summaries, newest/most-recently-active first. Sensor or
-trusted-context data is **never** included. With the optional `?blindUserId=<uuid>` query
-the caller must be an authenticated **CARETAKER** whose relationship to that blind user is
-**ACTIVE**; the response then contains only that user's sessions. Without the parameter the
-legacy unscoped (public) listing is returned.
+trusted-context data is **never** included.
+
+- **Scoped** (`?blindUserId=<uuid>`): the caller must be an authenticated **CARETAKER**
+  whose relationship to that blind user is **ACTIVE**; only that user's sessions are
+  returned. Non-existent or unmonitored blind user → `404`.
+- **Unscoped** (no parameter, Stage 8A): now requires an authenticated **CARETAKER**
+  session — unauthenticated → `401`, non-caretaker role → `403` — and then returns the
+  full listing. It is no longer public, so session summaries and message previews are
+  never exposed to anonymous callers.
 
 ```http
-GET /api/walle/sessions                  # legacy: all retained sessions (public)
-GET /api/walle/sessions?blindUserId=<uuid>   # caretaker-only, single blind user
+GET /api/walle/sessions                     # caretaker-authorized: all retained sessions
+GET /api/walle/sessions?blindUserId=<uuid>  # caretaker-only, single blind user
 ```
+
+Requests that do not satisfy the authorization above fail with `401`/`403` and leak no
+session data. A successful request is `200 OK`:`
 
 Response — `200 OK`:
 

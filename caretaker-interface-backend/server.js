@@ -158,6 +158,10 @@ const sseClients = new Set();
 const VALID_TRIGGERS = ['SOS', 'HEART_RATE', 'SOS_AND_HEART_RATE', 'NORMAL', 'OBSTACLE_LEFT', 'OBSTACLE_CENTER', 'OBSTACLE_RIGHT'];
 const VALID_STATUSES = ['NORMAL', 'ACTIVE', 'ACKNOWLEDGED', 'RESOLVED'];
 
+// Maximum length of an event message (Stage 8A). Applies to REST and MQTT paths
+// alike because both route through createEvent/validateEvent.
+const EVENT_MESSAGE_MAX = 256;
+
 const ALLOWED_TRANSITIONS = {
     ACTIVE: ['ACKNOWLEDGED', 'RESOLVED'],
     ACKNOWLEDGED: ['RESOLVED'],
@@ -249,6 +253,15 @@ function validateEvent(event) {
 
     if (!isValidTimestamp(event.timestamp)) {
         return 'Invalid timestamp';
+    }
+
+    if (event.message !== undefined && event.message !== null) {
+        if (typeof event.message !== 'string') {
+            return 'message must be a string';
+        }
+        if (event.message.length > EVENT_MESSAGE_MAX) {
+            return `message exceeds maximum length of ${EVENT_MESSAGE_MAX} characters`;
+        }
     }
 
     return null;
@@ -566,24 +579,11 @@ function publishBuzzerCommand(command) {
     return published;
 }
 
-// ── Stage 6 multi-user scoping helper ───────────────────────────────────
-// When a `blindUserId` query parameter is supplied, validates the caller is
-// an authenticated CARETAKER with an ACTIVE relationship to that blind user.
-// Returns the validated blindUserId string on success; on failure, sends the
-// appropriate error response and returns null.  When the parameter is absent
-// the helper returns undefined — the caller should fall back to unscoped
-// (backward-compatible) behavior.
-async function requireScopedBlindUser(req, res) {
-    const blindUserId = req.query.blindUserId;
-    if (blindUserId === undefined || blindUserId === null || blindUserId === '') {
-        return undefined; // no scoping requested — backward-compatible
-    }
-    if (!isValidUuid(blindUserId)) {
-        res.status(404).json({ error: 'Blind user not found' });
-        return null;
-    }
-    // Authenticate via session cookie (replicates requireAuth logic inline
-    // to avoid the next()-after-response issue with Express middleware).
+// Authenticates a request via the session cookie and requires the CARETAKER
+// role. Returns the session on success; on failure it sends the appropriate
+// response (401 not-authenticated / 403 forbidden) and returns null. Mirrors
+// the inline cookie logic used by requireScopedBlindUser below.
+async function requireCaretakerSession(req, res) {
     const rawToken = req.cookies ? req.cookies[SESSION_COOKIE_NAME] : undefined;
     if (!rawToken || typeof rawToken !== 'string') {
         res.status(401).json({ error: 'Not authenticated' });
@@ -604,6 +604,27 @@ async function requireScopedBlindUser(req, res) {
         res.status(403).json({ error: 'Forbidden' });
         return null;
     }
+    return session;
+}
+
+// ── Stage 6 multi-user scoping helper ───────────────────────────────────
+// When a `blindUserId` query parameter is supplied, validates the caller is
+// an authenticated CARETAKER with an ACTIVE relationship to that blind user.
+// Returns the validated blindUserId string on success; on failure, sends the
+// appropriate error response and returns null.  When the parameter is absent
+// the helper returns undefined — the caller should decide whether the unscoped
+// form requires authentication (see the /api/walle/sessions route).
+async function requireScopedBlindUser(req, res) {
+    const blindUserId = req.query.blindUserId;
+    if (blindUserId === undefined || blindUserId === null || blindUserId === '') {
+        return undefined; // no scoping requested — caller decides auth
+    }
+    if (!isValidUuid(blindUserId)) {
+        res.status(404).json({ error: 'Blind user not found' });
+        return null;
+    }
+    const session = await requireCaretakerSession(req, res);
+    if (!session) return null;
     const allowed = await hasActiveRelationship(session.id, blindUserId);
     if (!allowed) {
         res.status(404).json({ error: 'Blind user not found' });
@@ -869,6 +890,38 @@ const WALLE_MAX_MESSAGE_LENGTH = (() => {
     return Number.isFinite(raw) && raw > 0 ? raw : 1000;
 })();
 
+// Scopes the shared single-row runtime state to one authenticated device so a
+// Wall-E request never sees another blind user's private sensor/location data.
+// Only pieces whose identity matches the authenticated device's identifier or
+// blindUserId are kept; state that cannot be attributed safely (e.g. the
+// global buzzer flag, which carries no device identity) is omitted rather than
+// guessed.
+function scopeRuntimeStateForDevice(device, runtimeState) {
+    const identifier = device && device.identifier;
+    const blindUserId = device && device.blindUserId;
+    const scoped = {};
+    if (!device || !identifier || !blindUserId) return scoped;
+
+    if (runtimeState.latestLocation &&
+        (runtimeState.latestLocation.deviceId === identifier ||
+         runtimeState.latestLocation.blindUserId === blindUserId)) {
+        scoped.latestLocation = runtimeState.latestLocation;
+    }
+    if (runtimeState.latestDeviceStatus &&
+        runtimeState.latestDeviceStatus.deviceId === identifier) {
+        scoped.latestDeviceStatus = runtimeState.latestDeviceStatus;
+    }
+    if (runtimeState.lastHeartRate &&
+        runtimeState.lastHeartRate.deviceId === identifier) {
+        scoped.lastHeartRate = runtimeState.lastHeartRate;
+    }
+    if (runtimeState.latestFall &&
+        runtimeState.latestFall.deviceId === identifier) {
+        scoped.latestFall = runtimeState.latestFall;
+    }
+    return scoped;
+}
+
 app.post('/api/walle/chat', requireDeviceAuth, async (req, res) => {
     if (isWalleChatRateLimited(req)) {
         return res.status(429).json({ error: 'Too many requests. Please try again shortly.' });
@@ -895,7 +948,7 @@ app.post('/api/walle/chat', requireDeviceAuth, async (req, res) => {
     }
 
     // Only context that belongs to the authenticated device reaches Wall-E:
-    // its own events plus location/status/heart-rate from the shared device bus.
+    // its own events plus location/status/heart-rate scoped to its identity.
     const deviceEvents = new Map();
     for (const [alertId, event] of events.entries()) {
         if (event.deviceId === req.device.identifier || event.blindUserId === req.device.blindUserId) {
@@ -903,19 +956,32 @@ app.post('/api/walle/chat', requireDeviceAuth, async (req, res) => {
         }
     }
 
-    const contextSnapshot = buildTrustedContext({
-        latestLocation,
-        latestDeviceStatus,
-        lastHeartRate,
-        latestFall,
-        latestBuzzerState,
-        events: deviceEvents
-    });
-
-    conversationStore.ensureSession(sessionId, {
+    // Session ownership (Stage 8A): a device may ONLY continue a Wall-E session
+    // bound to its own device identifier and blind user. Ownership is always
+    // derived from the authenticated device, never from the client. A mismatch
+    // is answered as 404 "Session not found" — indistinguishable from a missing
+    // session — so another user's transcript existence is never leaked and the
+    // other conversation is never passed into the AI context.
+    const session = conversationStore.ensureSession(sessionId, {
         deviceId: req.device.identifier,
         blindUserId: req.device.blindUserId
     });
+    if (!session ||
+        (session.blindUserId && session.blindUserId !== req.device.blindUserId) ||
+        (session.deviceId && session.deviceId !== req.device.identifier)) {
+        return res.status(404).json({ error: 'Session not found' });
+    }
+
+    const contextSnapshot = buildTrustedContext(Object.assign(
+        scopeRuntimeStateForDevice(req.device, {
+            latestLocation,
+            latestDeviceStatus,
+            lastHeartRate,
+            latestFall
+        }),
+        { events: deviceEvents }
+    ));
+
     conversationStore.addUserMessage(sessionId, message.trim());
 
     const history = conversationStore.buildModelMessages(sessionId);
@@ -958,6 +1024,11 @@ app.get('/api/walle/sessions', async (req, res, next) => {
         if (blindUserId !== undefined) {
             return res.status(200).json(conversationStore.getSessionSummaries({ blindUserId }));
         }
+        // Stage 8A: the unscoped listing is no longer public. It now requires
+        // an authenticated CARETAKER; unauthenticated callers get 401/403 and
+        // never see session summaries or message previews.
+        const session = await requireCaretakerSession(req, res);
+        if (!session) return; // error already sent
         return res.status(200).json(conversationStore.getSessionSummaries());
     } catch (err) {
         return next(err);
@@ -1123,5 +1194,7 @@ module.exports = {
     persistenceIdle,
     persistEventBestEffort,
     EVENTS_WINDOW_MAX,
-    TELEMETRY_QUEUE_MAX
+    TELEMETRY_QUEUE_MAX,
+    scopeRuntimeStateForDevice,
+    EVENT_MESSAGE_MAX
 };

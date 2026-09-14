@@ -388,12 +388,15 @@ async function runTests() {
     assertStatus('walle: scoped X without cookie → 401', res.status, 401);
 
     res = await getJson('/api/walle/sessions?blindUserId=');
-    assertStatus('walle: empty blindUserId param → 200 (legacy unscoped)', res.status, 200);
+    assertStatus('walle: empty blindUserId param unauth → 401 (Stage-8A gate)', res.status, 401);
 
     res = await getJson('/api/walle/sessions');
-    assertStatus('walle: unscoped GET sessions → 200 (legacy)', res.status, 200);
+    assertStatus('walle: unscoped GET sessions unauth → 401 (Stage-8A gate)', res.status, 401);
+
+    res = await getJson('/api/walle/sessions', cookieHeader(state.cookieA));
+    assertStatus('walle: unscoped GET sessions caretaker → 200 (legacy)', res.status, 200);
     const allSes = (bodyOf(res) || []).map((s) => s.sessionId);
-    check('walle: unscoped sees all three sessions',
+    check('walle: authorized unscoped sees all three sessions',
         allSes.includes(SID_X) && allSes.includes(SID_Y) && allSes.includes(SID_Z),
         JSON.stringify(allSes));
 
@@ -480,7 +483,9 @@ async function runTests() {
     res = await getJson('/api/location');
     assertStatus('regression: unscoped location 200', res.status, 200);
     res = await getJson('/api/walle/sessions');
-    assertStatus('regression: unscoped sessions 200', res.status, 200);
+    assertStatus('regression: unscoped sessions unauth 401 (Stage-8A gate)', res.status, 401);
+    res = await getJson('/api/walle/sessions', cookieHeader(state.cookieA));
+    assertStatus('regression: unscoped sessions caretaker 200', res.status, 200);
 
     return state;
 }

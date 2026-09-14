@@ -264,8 +264,8 @@ function createHistoryRow(event) {
         <div class="history-rail"><span class="history-dot"></span></div>
         <div class="history-main">
             <div class="history-headline">
-                <span class="history-trigger ${triggerClass}">${triggerLabel}</span>
-                <span class="history-alert-id">${event.alertId}</span>
+                <span class="history-trigger ${triggerClass}"></span>
+                <span class="history-alert-id"></span>
             </div>
             <div class="history-meta">
                 <span class="history-time">${formatTime(event.timestamp)}</span>
@@ -273,14 +273,21 @@ function createHistoryRow(event) {
                 <span class="history-heart-rate">${hrDisplay}</span>
                 <span class="history-meta-sep">·</span>
                 <span class="history-location">${getLocationDisplay(event.latitude, event.longitude)}</span>
-                <span class="history-source">${sourceLabel}</span>
+                <span class="history-source"></span>
             </div>
         </div>
         <div class="history-side">
-            <span class="history-status ${statusClass}"><span class="dot"></span>${statusLabel}</span>
+            <span class="history-status ${statusClass}"><span class="dot"></span></span>
         </div>
         <span class="history-chevron"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><polyline points="9 6 15 12 9 18"></polyline></svg></span>
     `;
+    // Set event-derived values via textContent to prevent HTML injection.
+    // alertId and source are attacker-controlled (POST /api/events body);
+    // trigger/status labels are set via textContent for defence-in-depth.
+    item.querySelector('.history-trigger').textContent = triggerLabel;
+    item.querySelector('.history-alert-id').textContent = event.alertId;
+    item.querySelector('.history-source').textContent = sourceLabel;
+    item.querySelector('.history-status').appendChild(document.createTextNode(statusLabel));
     return item;
 }
 
@@ -304,7 +311,11 @@ function updateHistoryRow(alertId, newStatus) {
                 const statusClass = getStatusClass(newStatus);
                 const statusLabel = getStatusLabel(newStatus);
                 statusEl.className = `history-status ${statusClass}`;
-                statusEl.innerHTML = `<span class="dot"></span>${statusLabel}`;
+                statusEl.textContent = '';
+                const dot = document.createElement('span');
+                dot.className = 'dot';
+                statusEl.appendChild(dot);
+                statusEl.appendChild(document.createTextNode(statusLabel));
             }
         }
     });
@@ -468,7 +479,11 @@ function updateAlertDetails(event) {
 
     const statusEl = document.getElementById('selectedStatus');
     statusEl.className = `selected-status ${getDetailStatusClass(event.status)}`;
-    statusEl.innerHTML = `<span class="dot"></span>${getStatusLabel(event.status)}`;
+    statusEl.textContent = '';
+    const dot = document.createElement('span');
+    dot.className = 'dot';
+    statusEl.appendChild(dot);
+    statusEl.appendChild(document.createTextNode(getStatusLabel(event.status)));
 
     const statusValueEl = document.getElementById('selectedStatusValue');
     statusValueEl.textContent = getStatusLabel(event.status);
