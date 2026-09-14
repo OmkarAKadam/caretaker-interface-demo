@@ -37,7 +37,7 @@ The port is configurable via the `PORT` environment variable (defaults to `3000`
 | Method | Path                  | Purpose                                   |
 |--------|-----------------------|-------------------------------------------|
 | GET    | `/api/health`         | Health check (public)                     |
-| GET    | `/api/events`         | Retrieve all stored events (public)       |
+| GET    | `/api/events`         | Retrieve stored events (public, bounded to `EVENTS_WINDOW_MAX`) |
 | POST   | `/api/events`         | Create a new event (**device auth**)      |
 | PATCH  | `/api/events/:alertId`| Update one event's status (**device or caretaker auth**) |
 | GET    | `/api/location`       | Retrieve the latest phone GPS location (public) |
@@ -114,14 +114,21 @@ The ESP does not yet authenticate as a device.
 
 ## Storage
 
-This backend uses **in-memory storage** (`Map`). There is no database. **All events and
-the latest location are lost when the server restarts.**
+The live feed + event state run on an **in-memory hot path** (`Map`) so REST, SSE and MQTT
+stay fast and never block on a database. When PostgreSQL is configured, the backend **also
+persists** events, event statuses, the latest runtime snapshot (location, device status,
+heart rate, fall, buzzer) and Wall-E conversations, and **rehydrates them at boot**. If the
+database is unavailable, writes are parked in a **bounded queue** (`TELEMETRY_QUEUE_MAX`,
+default 500) and retried head-of-line; `GET /api/events` serves the bounded in-memory
+window instead. Without a database everything still works exactly as before, just without
+persistence.
 
 ## Database
 
 The backend uses PostgreSQL (via `DATABASE_URL`) for caretaker authentication, monitored
-users, caretaker↔blind-user relationships, and registered devices. The live event feed and
-latest location remain in-memory (lost on restart). Migrations live in `db/migrations/`:
+users, caretaker↔blind-user relationships, registered devices, **and telemetry persistence
+(Stage 5)**: events, latest runtime state, and Wall-E conversations. Migrations live in
+`db/migrations/`:
 
 ```text
 npm run migrate          # apply pending migrations
@@ -137,6 +144,7 @@ clean up after themselves:
 npm run test:auth      # Stage 2 — caretaker accounts & sessions
 npm run test:stage3    # Stage 3 — monitored users & caretaker authorization
 npm run test:stage4    # Stage 4 — device pairing & blind-client authentication
+npm run test:stage5    # Stage 5 — telemetry persistence & boot rehydration
 ```
 
 ## MQTT (optional)

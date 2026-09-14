@@ -13,6 +13,8 @@ const conversationStore = require('./ai/conversation-store');
 const { requireAuth, requireRole, hasActiveRelationship } = require('./auth/middleware');
 const { requireDeviceAuth } = require('./devices/middleware');
 const devicesRouter = require('./devices/routes');
+const queries = require('./telemetry/queries');
+const { createPersistenceQueue } = require('./telemetry/queue');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -49,6 +51,94 @@ let latestFall = null;
 let latestBuzzerState = null;
 let lastHeartRate = null;
 let mqttSeq = 0;
+
+// ── Stage 5 persistence (bounded, best-effort) ──────────────────────────
+// The in-memory variables above remain the synchronous hot path. Writes are
+// mirrored to PostgreSQL when available; the queue below absorbs database
+// downtime without ever blocking the request path.
+
+const EVENTS_WINDOW_MAX = (() => {
+    const raw = parseInt(process.env.EVENTS_WINDOW_MAX, 10);
+    return Number.isFinite(raw) && raw > 0 ? raw : 100;
+})();
+
+const TELEMETRY_QUEUE_MAX = (() => {
+    const raw = parseInt(process.env.TELEMETRY_QUEUE_MAX, 10);
+    return Number.isFinite(raw) && raw > 0 ? raw : 500;
+})();
+
+function snapshotRuntimeState() {
+    return {
+        location: latestLocation,
+        deviceStatus: latestDeviceStatus,
+        heartRate: lastHeartRate,
+        fall: latestFall,
+        buzzer: latestBuzzerState
+    };
+}
+
+// Runs one queued item. All three kinds are idempotent at the SQL level
+// (ON CONFLICT DO NOTHING, status UPDATE, single-row upsert), so a retried
+// item can never corrupt or duplicate telemetry.
+function applyPersistence(item) {
+    switch (item && item.kind) {
+        case 'event':
+            return queries.insertEvent(item);
+        case 'eventUpdate':
+            return queries.updateEventStatus(item.alertId, item.status);
+        case 'latestState':
+            return queries.upsertLatestState({
+                location: item.location,
+                deviceStatus: item.deviceStatus,
+                heartRate: item.heartRate,
+                fall: item.fall,
+                buzzer: item.buzzer
+            });
+        default:
+            return false;
+    }
+}
+
+const persistenceQueue = createPersistenceQueue({
+    max: TELEMETRY_QUEUE_MAX,
+    apply: applyPersistence
+});
+
+// Fire-and-forget event persistence (MQTT path). Durability is a bonus here:
+// the event is already live in memory and broadcast over SSE. When the
+// database is down the write is queued and retried.
+async function persistEventBestEffort(event) {
+    try {
+        const mapped = await queries.mapEventForInsert(event);
+        try {
+            await queries.insertEvent(mapped);
+        } catch (dbErr) {
+            persistenceQueue.enqueue(Object.assign({ kind: 'event' }, mapped));
+            console.warn('[Persistence] DB unavailable — event queued for retry:', dbErr && dbErr.message ? dbErr.message : dbErr);
+        }
+        return true;
+    } catch (err) {
+        console.error('[Persistence] Event persistence failed:', err && err.message ? err.message : err);
+        return false;
+    }
+}
+
+// Awaited by PATCH so a status change is durable (or queued) before the
+// client gets its 200.
+async function persistEventStatusBestEffort(alertId, status) {
+    try {
+        await queries.updateEventStatus(alertId, status);
+    } catch (dbErr) {
+        persistenceQueue.enqueue({ kind: 'eventUpdate', alertId, status });
+        console.warn('[Persistence] DB unavailable — status update queued:', dbErr && dbErr.message ? dbErr.message : dbErr);
+    }
+}
+
+// Latest-state snapshots are frequent, idempotent, single-row upserts. They
+// always flow through the queue: serialized, bounded, drop-oldest on overflow.
+function persistLatestStateBestEffort() {
+    persistenceQueue.enqueue(Object.assign({ kind: 'latestState' }, snapshotRuntimeState()));
+}
 
 const HEART_RATE_COOLDOWN_MS = 30000;
 const HEART_RATE_ALERT_LOW = 60;
@@ -173,6 +263,7 @@ function storeLocation(location, device) {
     }
 
     latestLocation = stored;
+    persistLatestStateBestEffort();
     return { ok: true, location: stored };
 }
 
@@ -243,6 +334,7 @@ function handleRadarMessage(payload) {
     const result = createEvent(event, { allowMissingCoordinates: true });
     if (result.ok) {
         console.log(`[MQTT] Radar event → ${trigger} (alertId ${result.event.alertId})`);
+        persistEventBestEffort(result.event);
     } else {
         console.warn(`[MQTT] Radar event skipped: ${result.error}`);
     }
@@ -273,6 +365,7 @@ function handleSosMessage(payload) {
     const result = createEvent(event, { allowMissingCoordinates: true });
     if (result.ok) {
         console.log(`[MQTT] SOS event received (alertId ${result.event.alertId})`);
+        persistEventBestEffort(result.event);
     } else {
         console.warn(`[MQTT] SOS event skipped: ${result.error}`);
     }
@@ -302,6 +395,7 @@ function handleDeviceStatusMessage(payload) {
         wifi: payload.wifi,
         receivedAt: new Date().toISOString()
     };
+    persistLatestStateBestEffort();
     console.log('[MQTT] Device status update received');
 }
 
@@ -320,6 +414,7 @@ function handleFallMessage(payload) {
         longitude: latestLocation ? latestLocation.longitude : null,
         receivedAt: new Date().toISOString()
     };
+    persistLatestStateBestEffort();
     console.warn('[MQTT] Fall event received — no dedicated trigger in the event model; stored in memory (not broadcast)');
 }
 
@@ -350,6 +445,7 @@ function handleAlertsMessage(payload) {
     const result = createEvent(event, { allowMissingCoordinates: true });
     if (result.ok) {
         console.log(`[MQTT] Alert routed → ${payload.trigger} (alertId ${result.event.alertId})`);
+        persistEventBestEffort(result.event);
     } else {
         console.warn(`[MQTT] Alert skipped: ${result.error}`);
     }
@@ -376,6 +472,7 @@ function handleHeartRateMessage(payload) {
         timestamp: isValidTimestamp(payload.timestamp) ? payload.timestamp : new Date().toISOString(),
         receivedAt: new Date().toISOString()
     };
+    persistLatestStateBestEffort();
 
     const abnormal = raw < HEART_RATE_ALERT_LOW || raw > HEART_RATE_ALERT_HIGH;
 
@@ -409,6 +506,7 @@ function handleHeartRateMessage(payload) {
     if (result.ok) {
         lastHeartRateAlertAt[deviceId] = now;
         console.log(`[MQTT] HEART_RATE event created (${raw} BPM, alertId ${result.event.alertId}).`);
+        persistEventBestEffort(result.event);
     } else {
         console.warn(`[MQTT] HEART_RATE event skipped: ${result.error}`);
     }
@@ -454,6 +552,7 @@ function publishBuzzerCommand(command) {
     });
     if (published) {
         latestBuzzerState = command === BUZZER_COMMANDS.BUZZER_ON ? 'ON' : 'OFF';
+        persistLatestStateBestEffort();
     }
     return published;
 }
@@ -466,8 +565,21 @@ app.get('/api/health', (req, res) => {
     });
 });
 
-app.get('/api/events', (req, res) => {
-    res.status(200).json(Array.from(events.values()));
+app.get('/api/events', async (req, res, next) => {
+    try {
+        const recent = await queries.listRecentEvents(EVENTS_WINDOW_MAX);
+        // A fresh database with a live in-memory window (e.g. right after the
+        // first write ever) serves whichever is non-empty. Both are bounded.
+        if (recent.length === 0 && events.size > 0) {
+            return res.status(200).json(Array.from(events.values()).slice(-EVENTS_WINDOW_MAX));
+        }
+        return res.status(200).json(recent);
+    } catch (err) {
+        // Database unavailable — serve the bounded in-memory window instead,
+        // preserving the previous (Stage 1–4) contract of a 200 response.
+        console.warn('[Persistence] GET /api/events fell back to memory:', err && err.message ? err.message : err);
+        return res.status(200).json(Array.from(events.values()).slice(-EVENTS_WINDOW_MAX));
+    }
 });
 
 app.get('/api/location', (req, res) => {
@@ -487,7 +599,7 @@ app.post('/api/location', requireDeviceAuth, (req, res) => {
     return res.status(200).json(result.location);
 });
 
-app.post('/api/events', requireDeviceAuth, (req, res) => {
+app.post('/api/events', requireDeviceAuth, async (req, res, next) => {
     // Identity comes from the authenticated device, never from the request
     // body. Any client-supplied deviceId/blindUserId is overwritten.
     req.body.deviceId = req.device.identifier;
@@ -498,6 +610,9 @@ app.post('/api/events', requireDeviceAuth, (req, res) => {
     if (!result.ok) {
         return res.status(result.status).json({ error: result.error });
     }
+
+    // 201 ⇒ durable-in-DB or queued-for-retry; never throws.
+    await persistEventBestEffort(result.event);
 
     return res.status(result.status).json(result.event);
 });
@@ -519,7 +634,21 @@ function requireEventActor(req, res, next) {
 
 app.patch('/api/events/:alertId', requireEventActor, async (req, res, next) => {
     const alertId = req.params.alertId;
-    const event = events.get(alertId);
+    let event = events.get(alertId);
+
+    if (!event) {
+        // Graceful degradation: the event may be persisted in the database but
+        // outside the bounded in-memory window. Hydrate it so the authorization
+        // and transition logic below still works; a genuine miss stays 404.
+        try {
+            event = await queries.findEventByAlertId(alertId);
+            if (event) {
+                events.set(alertId, event);
+            }
+        } catch (err) {
+            return next(err);
+        }
+    }
 
     if (!event) {
         return res.status(404).json({ error: 'Event not found' });
@@ -558,6 +687,7 @@ app.patch('/api/events/:alertId', requireEventActor, async (req, res, next) => {
     }
 
     event.status = newStatus;
+    await persistEventStatusBestEffort(alertId, newStatus);
     return res.status(200).json(event);
 });
 
@@ -771,20 +901,101 @@ app.use((err, req, res, next) => {
     return res.status(500).json({ error: 'Internal server error' });
 });
 
-const server = app.listen(PORT, () => {
-    console.log(`Caretaker backend listening on http://localhost:${PORT}`);
-});
+// ── Stage 5 boot rehydration ────────────────────────────────────────────
+// Restores what PostgreSQL has (the most recent EVENTS_WINDOW_MAX events, the
+// latest-state snapshot, the highest persisted MQTT sequence number, and the
+// Wall-E conversation history) into the in-memory hot path before serving.
+// Never throws: without a database the server starts empty, exactly as it did
+// before persistence existed.
+async function bootRehydrateFromDatabase() {
+    try {
+        const [recentEvents, latestState, maxSeq] = await Promise.all([
+            queries.listRecentEvents(EVENTS_WINDOW_MAX),
+            queries.loadLatestState(),
+            queries.loadMaxMqttSeq()
+        ]);
 
-function shutdown(signal) {
-    console.log(`[Server] Received ${signal}, shutting down…`);
-    if (mqttClient.close) {
-        mqttClient.close();
+        events.clear();
+        for (const event of recentEvents) {
+            events.set(event.alertId, event);
+        }
+
+        if (latestState) {
+            if (latestState.location) latestLocation = latestState.location;
+            if (latestState.deviceStatus) latestDeviceStatus = latestState.deviceStatus;
+            if (latestState.heartRate) lastHeartRate = latestState.heartRate;
+            if (latestState.fall) latestFall = latestState.fall;
+            if (latestState.buzzer) latestBuzzerState = latestState.buzzer;
+        }
+
+        // Never reuse a sequence number the database already holds (a reused
+        // MQTT-* alertId would 409-collide forever).
+        mqttSeq = maxSeq;
+
+        await conversationStore.rehydrateFromDb();
+
+        console.log(`[Persistence] Rehydrated from database: ${recentEvents.length} event(s), latest state, MQTT seq ${maxSeq}.`);
+        return true;
+    } catch (err) {
+        console.warn('[Persistence] Boot rehydration unavailable — starting from empty state:', err && err.message ? err.message : err);
+        return false;
     }
-    server.close(() => {
-        process.exit(0);
-    });
-    setTimeout(() => process.exit(0), 3000).unref();
 }
 
-process.on('SIGINT', () => shutdown('SIGINT'));
-process.on('SIGTERM', () => shutdown('SIGTERM'));
+function getLatestRuntimeState() {
+    return {
+        latestLocation,
+        latestDeviceStatus,
+        lastHeartRate,
+        latestFall,
+        latestBuzzerState,
+        mqttSeq,
+        eventCount: events.size,
+        queueSize: persistenceQueue.size()
+    };
+}
+
+// Resolves when the bounded persistence queue has drained (all queued writes
+// applied). Used by tests after fire-and-forget writes. Bounded wait is the
+// caller's responsibility.
+async function persistenceIdle() {
+    while (persistenceQueue.size() > 0) {
+        await new Promise((resolve) => setTimeout(resolve, 25));
+    }
+}
+
+if (require.main === module) {
+    bootRehydrateFromDatabase().then(() => {
+        const server = app.listen(PORT, () => {
+            console.log(`Caretaker backend listening on http://localhost:${PORT}`);
+        });
+
+        function shutdown(signal) {
+            console.log(`[Server] Received ${signal}, shutting down…`);
+            if (mqttClient.close) {
+                mqttClient.close();
+            }
+            server.close(() => {
+                process.exit(0);
+            });
+            setTimeout(() => process.exit(0), 3000).unref();
+        }
+
+        process.on('SIGINT', () => shutdown('SIGINT'));
+        process.on('SIGTERM', () => shutdown('SIGTERM'));
+    });
+}
+
+// Exported for in-process integration tests (restart simulation modules call
+// handleMqttMessage / createEvent / bootRehydrateFromDatabase directly).
+module.exports = {
+    app,
+    handleMqttMessage,
+    createEvent,
+    bootRehydrateFromDatabase,
+    getLatestRuntimeState,
+    persistenceIdle,
+    persistEventBestEffort,
+    EVENTS_WINDOW_MAX,
+    TELEMETRY_QUEUE_MAX
+};

@@ -10,7 +10,8 @@
     "migrate:status": "node --env-file-if-exists=.env db/migrate.js --status",
     "test:auth": "node --env-file-if-exists=.env scripts/test-auth.js",
     "test:stage3": "node --env-file-if-exists=.env scripts/test-stage3.js",
-    "test:stage4": "node --env-file-if-exists=.env scripts/test-stage4.js"
+    "test:stage4": "node --env-file-if-exists=.env scripts/test-stage4.js",
+    "test:stage5": "node --env-file-if-exists=.env scripts/test-stage5.js"
   },
   "license": "UNLICENSED",
   "private": true,

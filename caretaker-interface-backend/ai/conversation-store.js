@@ -1,5 +1,7 @@
 'use strict';
 
+const { isConfigured: dbIsConfigured } = require('../db/pool');
+
 const WALLE_SESSION_MAX_TURNS_DEFAULT = 20;
 const WALLE_SESSION_TTL_MS_DEFAULT = 24 * 60 * 60 * 1000;
 const WALLE_MAX_SESSIONS_DEFAULT = 100;
@@ -16,6 +18,88 @@ const CONFIG = Object.freeze({
 });
 
 const sessions = new Map();
+
+// ── PostgreSQL write-through ─────────────────────────────────────────────
+// When DATABASE_URL is configured, every session and turn is mirrored to the
+// database in the background (never awaited by the hot path). A DB failure is
+// logged and ignored — conversations always remain fully in-memory.
+
+let dbConfigured = false;
+try { dbConfigured = dbIsConfigured(); } catch (_e) { /* DATABASE_URL not set */ }
+let queries = null;
+try { queries = require('../telemetry/queries'); } catch (_e) { /* telemetry not loaded yet */ }
+
+let pendingSyncs = new Set();
+const syncChains = new Map();
+
+function track(p) {
+    if (!p || typeof p.then !== 'function') return;
+    pendingSyncs.add(p);
+    p.finally(() => { pendingSyncs.delete(p); }).catch(() => {});
+}
+
+// Serializes DB syncs per session so a "delete stale row then insert" reset can
+// never interleave with a concurrent turn sync (which would write messages to
+// a row that is about to be deleted).
+function enqueueSync(sessionId, task) {
+    if (!dbConfigured || !queries) return;
+    const prev = syncChains.get(sessionId) || Promise.resolve();
+    const next = prev.then(task, task);
+    syncChains.set(sessionId, next.finally(() => {
+        if (syncChains.get(sessionId) === next) {
+            syncChains.delete(sessionId);
+        }
+    }));
+    track(next);
+}
+
+// Drains all pending DB sync promises. Used by integration tests after
+// fire-and-forget chat calls to ensure the DB has been updated before
+// simulating a restart.
+async function drainPendingSyncs() {
+    while (pendingSyncs.size > 0) {
+        const batch = Array.from(pendingSyncs);
+        await Promise.allSettled(batch);
+    }
+}
+
+// Full session → DB sync: upserts the walle_sessions row and inserts any turns
+// missing from walle_messages. Turn idempotency uses the created_at timestamp
+// (already unique to the millisecond) as a proxy for a unique turn key.
+async function persistSession(session) {
+    if (!session || !queries) return;
+    const dbRow = await queries.upsertWallSession(session.sessionId, {
+        deviceId: session.deviceId,
+        blindUserId: session.blindUserId,
+        lastActiveAt: session.lastActiveAt
+    });
+    if (!dbRow) return;
+    const existingTimestamps = await queries.listWallTurnTimestamps(dbRow.id);
+    for (const turn of session.turns) {
+        const ts = Date.parse(turn.timestamp);
+        if (!Number.isFinite(ts)) continue;
+        if (existingTimestamps.has(ts)) continue;
+        await queries.insertWallMessage(dbRow.id, turn.role, turn.text, turn.model, turn.timestamp);
+    }
+}
+
+// New sessions reset any stale DB row so started_at matches the current
+// in-memory start time. Used only when ensureSession creates a brand-new session.
+async function resetSessionRow(session) {
+    if (!session || !queries) return;
+    await queries.deleteWallSessionByClientId(session.sessionId);
+    await persistSession(session);
+}
+
+function syncSessionToDb(session) {
+    if (!dbConfigured || !session) return;
+    enqueueSync(session.sessionId, () => persistSession(session));
+}
+
+function syncNewSessionToDb(session) {
+    if (!dbConfigured || !session) return;
+    enqueueSync(session.sessionId, () => resetSessionRow(session));
+}
 
 function nowIso() {
     return new Date().toISOString();
@@ -86,6 +170,7 @@ function ensureSession(sessionId, meta) {
         };
         sessions.set(sessionId, session);
         enforceMaxSessions();
+        syncNewSessionToDb(session);
     }
     return session;
 }
@@ -100,6 +185,7 @@ function appendTurn(session, turn) {
     session.turns.push(turn);
     capTurns(session);
     session.lastActiveAt = nowIso();
+    syncSessionToDb(session);
     return turn;
 }
 
@@ -198,6 +284,47 @@ function getSessionTranscript(sessionId) {
     return transcript;
 }
 
+// ── Boot rehydration ─────────────────────────────────────────────────────
+// Restores persisted Wall-E conversations into memory from PostgreSQL so that
+// the blind client sees them after a backend restart. Expired sessions are
+// skipped. identity (deviceId) is reverse-resolved from the UUID FK so the
+// API-facing contract is preserved.
+
+async function rehydrateFromDb() {
+    if (!dbConfigured || !queries) return false;
+
+    try {
+        const rows = await queries.listWallSessions();
+        for (const row of rows) {
+            const sessionId = row.client_session_id;
+            if (sessions.has(sessionId)) continue;
+
+            const lastActiveMs = Date.parse(row.last_active_at);
+            if (!Number.isFinite(lastActiveMs)) continue;
+            if (lastActiveMs + CONFIG.ttlMs < Date.now()) continue;
+
+            const turns = await queries.listWallTurns(row.id, CONFIG.maxTurnsPerSession);
+            const deviceId = row.device_id
+                ? await queries.resolveDeviceIdentifier(row.device_id)
+                : null;
+
+            sessions.set(sessionId, {
+                sessionId,
+                startedAt: new Date(row.started_at).toISOString(),
+                lastActiveAt: new Date(row.last_active_at).toISOString(),
+                turns,
+                deviceId: deviceId || null,
+                blindUserId: row.blind_user_id || null
+            });
+        }
+        enforceMaxSessions();
+        return true;
+    } catch (err) {
+        console.warn('[Wall-E] rehydrateFromDb failed (conversations empty):', err && err.message ? err.message : err);
+        return false;
+    }
+}
+
 module.exports = {
     CONFIG,
     getSession,
@@ -208,5 +335,7 @@ module.exports = {
     getSessionCount,
     getSessionSummaries,
     getSessionTranscript,
-    prune
+    prune,
+    rehydrateFromDb,
+    drainPendingSyncs
 };

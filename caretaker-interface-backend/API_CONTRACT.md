@@ -15,7 +15,7 @@ Base URL: `http://localhost:3000`
 | Method | Path                  | Purpose                                        |
 |--------|-----------------------|------------------------------------------------|
 | GET    | `/api/health`         | Health check                                   |
-| GET    | `/api/events`         | Retrieve all stored events                     |
+| GET    | `/api/events`         | Retrieve stored events (public; most recent `EVENTS_WINDOW_MAX`, default 100) |
 | POST   | `/api/events`         | **Create a new hardware/alert event (device auth)** |
 | GET    | `/api/events/stream`  | **SSE stream** — live events broadcast as they are created (public) |
 | PATCH  | `/api/events/:alertId`| Update the status of one event (caretaker or owning device)|
@@ -568,11 +568,12 @@ Content-Type: application/json
 
 ### Wall-E conversation history (read-only, caretaker view)
 
-Conversation history is exposed read-only for future caretaker UI use. It is **in-memory
-only**: no database, no files. Conversations are **cleared when the backend restarts**, and
-only sessions still retained within the configured TTL (`WALLE_SESSION_TTL_MS`, default 24h),
-session cap (`WALLE_MAX_SESSIONS`), and per-session turn cap (`WALLE_SESSION_MAX_TURNS`) are
-available.
+Conversation history is exposed read-only for future caretaker UI use. Sessions live on the
+**in-memory hot path** and are **mirrored to PostgreSQL in the background** when the
+database is configured, so they survive a backend restart (boot rehydration); without a
+database they remain in-memory only. The in-memory retention limits still apply
+(`WALLE_SESSION_TTL_MS` default 24h, `WALLE_MAX_SESSIONS` default 100, and per-session
+`WALLE_SESSION_MAX_TURNS` default 20).
 
 | Method | Path                          | Purpose                                    |
 |--------|-------------------------------|--------------------------------------------|
