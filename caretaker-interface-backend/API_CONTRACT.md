@@ -14,12 +14,12 @@ Base URL: `http://localhost:3000`
 
 | Method | Path                  | Purpose                                        |
 |--------|-----------------------|------------------------------------------------|
-| GET    | `/api/health`         | Health check                                   |
-| GET    | `/api/events`         | Retrieve stored events (public; most recent `EVENTS_WINDOW_MAX`, default 100) — optional `?blindUserId=` scoping for caretakers |
+| GET    | `/api/health`         | Health check (public; caretaker-gated when `REQUIRE_AUTH_FOR_READS=true`) |
+| GET    | `/api/events`         | Retrieve stored events (public in demo mode; most recent `EVENTS_WINDOW_MAX`, default 100) — optional `?blindUserId=` scoping for caretakers |
 | POST   | `/api/events`         | **Create a new hardware/alert event (device auth)** |
-| GET    | `/api/events/stream`  | **SSE stream** — live events broadcast as they are created (public) |
+| GET    | `/api/events/stream`  | **SSE stream** — live events broadcast as they are created (public in demo mode; caretaker-gated + connection-capped when configured) |
 | PATCH  | `/api/events/:alertId`| Update the status of one event (caretaker or owning device)|
-| GET    | `/api/location`       | Retrieve the latest phone GPS location — optional `?blindUserId=` scoping for caretakers |
+| GET    | `/api/location`       | Retrieve the latest phone GPS location (public in demo mode) — optional `?blindUserId=` scoping for caretakers |
 | POST   | `/api/location`       | Publish the phone's current GPS location (device auth) |
 | GET    | `/api/devices`        | List monitor-cap devices (caretaker auth)      |
 | POST   | `/api/devices`        | Register a device — pairing token returned once (caretaker auth) |
@@ -58,6 +58,13 @@ The `data` payload is the **full stored event object** (same shape as `POST /api
 returns). Disconnected clients are cleaned up automatically; clients reconnect with
 `retry: 3000`.
 
+**Access & capacity (Stage 8B):** by default the stream is public. When
+`REQUIRE_AUTH_FOR_READS=true`, opening the stream requires an authenticated **CARETAKER**
+cookie (`401` anonymous, `403` non-caretaker) — the caretaker dashboard works either way,
+but the Blind Client's unauthenticated `EventSource` breaks in that mode. A per-instance
+concurrent connection cap (`SSE_MAX_CLIENTS`, default 30) rejects additional streams with
+`503 Too many connections — try again shortly.`; disconnects are always counted out.
+
 ## Phone GPS endpoints
 
 The **user's mobile phone is the authoritative GPS source**. The phone publishes its
@@ -91,6 +98,8 @@ POST /api/location
 | `timestamp` | string  | optional | ISO-8601. Defaults to server now if omitted.    |
 
 Returns `200 OK` with the stored location. Invalid data returns `400 Bad Request`.
+Exceeding the per-device `DEVICE_LOCATION_RATE_MAX` within `DEVICE_WRITE_RATE_WINDOW_MS`
+returns `429 Too Many Requests`.
 
 ### GET /api/location — retrieve latest phone GPS
 
@@ -100,9 +109,11 @@ caller must be an authenticated **CARETAKER** whose relationship to that blind u
 placeholders when none has been received for them):
 
 ```http
-GET /api/location                # legacy: latest location across all users (public)
+GET /api/location                # legacy: latest location across all users (public in demo mode)
 GET /api/location?blindUserId=<uuid>   # caretaker-only, single blind user
 ```
+
+When `REQUIRE_AUTH_FOR_READS=true`, the **unscoped** form requires a CARETAKER cookie too.
 
 ```json
 {
@@ -126,6 +137,26 @@ If no location has been received yet:
 > `latest_states`), so after another user posts a new location the previous user's
 > scoped read returns the `null` placeholders above. No fake GPS coordinates are ever
 > generated or returned.
+
+---
+
+## Production hardening (Stage 8B)
+
+Controls that are **off by default** (or set to generous values) so the demo keeps working,
+and can be tightened for production without any client-code change to the caretaker
+dashboard.
+
+| Control | Default | When enabled |
+|---------|---------|--------------|
+| `REQUIRE_AUTH_FOR_READS` | `false` | The public read endpoints (`GET /api/events`, `/api/location`, `/api/events/stream`, `/api/health`, `/api/buzzer`, unscoped forms) require a **CARETAKER** cookie → `401` anonymous / `403` non-caretaker. The Blind Client's unauthenticated SSE feed and phone health/location polls break in this mode. |
+| `SSE_MAX_CLIENTS` | `30` | Per-instance concurrent SSE streams; excess → `503`. |
+| `DEVICE_EVENTS_RATE_MAX`, `DEVICE_LOCATION_RATE_MAX`, `DEVICE_BUZZER_RATE_MAX` | `120` / `120` / `60` | Per authenticated **device** (not IP) writes per `DEVICE_WRITE_RATE_WINDOW_MS` (default 60000 ms) on `POST /api/events`, `/api/location`, `/api/buzzer`. Over the limit → `429 Too many requests.` MQTT ingestion is unaffected. |
+| `TRUST_PROXY` | *(unset)* | Interprets `X-Forwarded-For` for `req.ip` so rate limiting/headers see the real client. Accepts a positive integer hop count or `loopback`/`linklocal`/`uniquelocal`; anything else is **rejected** and falls back to no proxy trust. Limiting stays in-memory and per-instance. |
+
+Every response also carries `X-Content-Type-Options: nosniff`, `X-Frame-Options: DENY`,
+and `Referrer-Policy: no-referrer`; `Strict-Transport-Security` is added when
+`NODE_ENV=production` or the request is HTTPS. A **Content-Security-Policy is deferred**
+(the static frontend uses inline scripts and CDN assets — see `README.md`).
 
 ---
 
@@ -162,6 +193,8 @@ Behavior:
 - If MQTT is not configured or not connected, the endpoint returns `503` and **no fake state
   is recorded** — the command is not silently "applied" in the UI.
 - On a successful publish, `200` returns `{ "command": ..., "state": "ON"|"OFF", "published": true }`.
+- Exceeding the per-device `DEVICE_BUZZER_RATE_MAX` within `DEVICE_WRITE_RATE_WINDOW_MS`
+  returns `429 Too Many Requests`.
 
 ### GET /api/buzzer — read last known command state
 
@@ -317,6 +350,7 @@ The event flows through the same pipeline as any other trigger:
 | `201 Created`  | Event accepted and stored.                                 |
 | `400 Bad Request` | Malformed payload (invalid trigger/status/coordinates/timestamp/alertId). Also returned when an event omits coordinates and no phone location exists (`Location unavailable`). |
 | `409 Conflict` | `alertId` already exists. Event is not overwritten.         |
+| `429 Too Many Requests` | The authenticated device exceeded `DEVICE_EVENTS_RATE_MAX` writes within `DEVICE_WRITE_RATE_WINDOW_MS`. |
 
 ---
 
@@ -504,9 +538,14 @@ X-Device-Token: <43-char base64url token>
 - Event `PATCH` requires the event to belong to the authenticated device
   (`403` otherwise). Caretakers can still update any linked user's events.
 - The SSE feed `/api/events/stream`, `GET /api/health` and the **unscoped** forms of
-  `GET /api/location` and `GET /api/events` remain public (caretaker console + voice client).
+  `GET /api/location` and `GET /api/events` remain public **in the demo default**
+  (caretaker console + voice client); when `REQUIRE_AUTH_FOR_READS=true` those unscoped
+  reads become caretaker-gated (Stage 8B).
   Whenever a `?blindUserId=` filter is supplied on those GET endpoints, they become
   **caretaker-authorized and strictly per-user** (Stage 6).
+- Device write endpoints (`POST /api/events`, `/api/location`, `/api/buzzer`) are
+  rate-limited **per authenticated device** (Stage 8B): over `DEVICE_*_RATE_MAX` within
+  `DEVICE_WRITE_RATE_WINDOW_MS` → `429`. One device's burst never affects another's budget.
 - The **unscoped** form of `GET /api/walle/sessions` is **caretaker-authorized** (Stage 8A):
   unauthenticated → `401`, non-caretaker session → `403`; authenticated CARETAKER → `200`
   with the full listing. The `?blindUserId=` form keeps its Stage 6 rules (caretaker +

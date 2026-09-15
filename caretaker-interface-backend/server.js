@@ -17,6 +17,8 @@ const { requireDeviceAuth } = require('./devices/middleware');
 const devicesRouter = require('./devices/routes');
 const queries = require('./telemetry/queries');
 const { createPersistenceQueue } = require('./telemetry/queue');
+const { createRateLimiter } = require('./auth/rate-limit');
+const { securityHeaders } = require('./security-headers');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -34,6 +36,53 @@ function getAllowedOrigins() {
 }
 
 const allowedOrigins = getAllowedOrigins();
+
+// ── Stage 8B: production hardening configuration ────────────────────────
+
+function envPositiveInt(name, fallback) {
+    const raw = parseInt(process.env[name], 10);
+    return Number.isFinite(raw) && raw > 0 ? raw : fallback;
+}
+
+// When enabled, the read endpoints that are public by default (GET /api/events,
+// GET /api/location, GET /api/events/stream, GET /api/health, GET /api/buzzer)
+// require an authenticated CARETAKER session. Default OFF preserves the demo
+// behavior; production deployments should enable it.
+const REQUIRE_READ_AUTH = (() => {
+    const raw = process.env.REQUIRE_AUTH_FOR_READS;
+    return raw === 'true' || raw === '1' || raw === 'yes';
+})();
+
+// Optional trusted-reverse-proxy configuration. req.ip feeds the in-memory rate
+// limiters and the caretaker-session checks, so behind a proxy it must be
+// resolved from X-Forwarded-For. Only explicit values are accepted (a positive
+// integer hop count or the built-in loopback/linklocal/uniquelocal patterns);
+// arbitrary or boolean values are rejected and logged. Rate limiting stays
+// in-memory and per-instance — it is never globally distributed.
+function resolveTrustProxy() {
+    const raw = process.env.TRUST_PROXY;
+    if (raw === undefined || raw === null) return false;
+    const value = String(raw).trim();
+    if (value === '') return false;
+    if (value === 'loopback' || value === 'linklocal' || value === 'uniquelocal') {
+        return value;
+    }
+    if (/^[1-9]\d*$/.test(value)) {
+        return parseInt(value, 10);
+    }
+    console.warn(
+        `[Config] TRUST_PROXY value "${value}" is not a supported hop count or ` +
+        'pattern (loopback | linklocal | uniquelocal). Falling back to no proxy trust.'
+    );
+    return false;
+}
+
+const trustProxySetting = resolveTrustProxy();
+if (trustProxySetting !== false) {
+    app.set('trust proxy', trustProxySetting);
+}
+
+app.use(securityHeaders);
 
 app.use(cors({
     origin(origin, callback) {
@@ -154,6 +203,37 @@ const HEART_RATE_ALERT_LOW = 60;
 const HEART_RATE_ALERT_HIGH = 100;
 const lastHeartRateAlertAt = {};
 const sseClients = new Set();
+
+// Stage 8B: cap on concurrent SSE connections per instance. Bounds memory and
+// the abuse surface while keeping the normal demo consoles connected.
+const SSE_MAX_CLIENTS = envPositiveInt('SSE_MAX_CLIENTS', 30);
+
+// Exposed for the Stage 8B harness so it can assert connection cleanup.
+function getSseClientCount() {
+    return sseClients.size;
+}
+
+// ── Stage 8B: per-device write rate limits ──────────────────────────────
+// Keyed by the authenticated device identifier (verified against the stored
+// bcrypt secret), so one device's traffic can never exhaust another device's
+// budget. Generous defaults sit well above normal sensor telemetry; the MQTT
+// ingestion path is a separate pipeline and is unaffected by these REST limits.
+const DEVICE_WRITE_RATE_WINDOW_MS = envPositiveInt('DEVICE_WRITE_RATE_WINDOW_MS', 60 * 1000);
+const DEVICE_EVENTS_RATE_MAX = envPositiveInt('DEVICE_EVENTS_RATE_MAX', 120);
+const DEVICE_LOCATION_RATE_MAX = envPositiveInt('DEVICE_LOCATION_RATE_MAX', 120);
+const DEVICE_BUZZER_RATE_MAX = envPositiveInt('DEVICE_BUZZER_RATE_MAX', 60);
+
+function deviceRateLimit(max) {
+    return createRateLimiter({
+        max,
+        windowMs: DEVICE_WRITE_RATE_WINDOW_MS,
+        key: (req) => (req.device && req.device.identifier) || req.ip || 'unknown'
+    });
+}
+
+const deviceEventsLimiter = deviceRateLimit(DEVICE_EVENTS_RATE_MAX);
+const deviceLocationLimiter = deviceRateLimit(DEVICE_LOCATION_RATE_MAX);
+const deviceBuzzerLimiter = deviceRateLimit(DEVICE_BUZZER_RATE_MAX);
 
 const VALID_TRIGGERS = ['SOS', 'HEART_RATE', 'SOS_AND_HEART_RATE', 'NORMAL', 'OBSTACLE_LEFT', 'OBSTACLE_CENTER', 'OBSTACLE_RIGHT'];
 const VALID_STATUSES = ['NORMAL', 'ACTIVE', 'ACKNOWLEDGED', 'RESOLVED'];
@@ -633,7 +713,15 @@ async function requireScopedBlindUser(req, res) {
     return blindUserId;
 }
 
-app.get('/api/health', (req, res) => {
+app.get('/api/health', async (req, res, next) => {
+    if (REQUIRE_READ_AUTH) {
+        try {
+            const session = await requireCaretakerSession(req, res);
+            if (!session) return;
+        } catch (err) {
+            return next(err);
+        }
+    }
     res.status(200).json({
         status: 'ok',
         mqtt: mqttClient.getState(),
@@ -650,6 +738,16 @@ app.get('/api/events', async (req, res, next) => {
         // Auth itself depends on the database; when it is unreachable there is
         // no way to authorize scoping, so fail closed rather than fall back.
         return next(err);
+    }
+
+    if (blindUserId === undefined && REQUIRE_READ_AUTH) {
+        // Production mode: the unscoped legacy-read form is no longer public.
+        try {
+            const session = await requireCaretakerSession(req, res);
+            if (!session) return; // error already sent
+        } catch (err) {
+            return next(err);
+        }
     }
 
     let rows;
@@ -686,6 +784,11 @@ app.get('/api/location', async (req, res, next) => {
     try {
         const blindUserId = await requireScopedBlindUser(req, res);
         if (blindUserId === null) return;
+        if (blindUserId === undefined && REQUIRE_READ_AUTH) {
+            // Production mode: the unscoped legacy-read form is no longer public.
+            const session = await requireCaretakerSession(req, res);
+            if (!session) return;
+        }
         if (blindUserId !== undefined) {
             if (latestLocation && latestLocation.blindUserId === blindUserId) {
                 return res.status(200).json(latestLocation);
@@ -702,7 +805,7 @@ app.get('/api/location', async (req, res, next) => {
     }
 });
 
-app.post('/api/location', requireDeviceAuth, (req, res) => {
+app.post('/api/location', requireDeviceAuth, deviceLocationLimiter, (req, res) => {
     const result = storeLocation(req.body, req.device);
 
     if (!result.ok) {
@@ -712,7 +815,7 @@ app.post('/api/location', requireDeviceAuth, (req, res) => {
     return res.status(200).json(result.location);
 });
 
-app.post('/api/events', requireDeviceAuth, async (req, res, next) => {
+app.post('/api/events', requireDeviceAuth, deviceEventsLimiter, async (req, res, next) => {
     // Identity comes from the authenticated device, never from the request
     // body. Any client-supplied deviceId/blindUserId is overwritten.
     req.body.deviceId = req.device.identifier;
@@ -804,7 +907,7 @@ app.patch('/api/events/:alertId', requireEventActor, async (req, res, next) => {
     return res.status(200).json(event);
 });
 
-app.post('/api/buzzer', requireDeviceAuth, (req, res) => {
+app.post('/api/buzzer', requireDeviceAuth, deviceBuzzerLimiter, (req, res) => {
     const command = req.body && req.body.command;
     const state = req.body && req.body.state;
 
@@ -831,7 +934,15 @@ app.post('/api/buzzer', requireDeviceAuth, (req, res) => {
     });
 });
 
-app.get('/api/buzzer', (req, res) => {
+app.get('/api/buzzer', async (req, res, next) => {
+    if (REQUIRE_READ_AUTH) {
+        try {
+            const session = await requireCaretakerSession(req, res);
+            if (!session) return;
+        } catch (err) {
+            return next(err);
+        }
+    }
     return res.status(200).json({
         state: latestBuzzerState,
         commandTopic: TOPICS.DEVICE_COMMAND,
@@ -839,7 +950,22 @@ app.get('/api/buzzer', (req, res) => {
     });
 });
 
-app.get('/api/events/stream', (req, res) => {
+app.get('/api/events/stream', async (req, res, next) => {
+    if (REQUIRE_READ_AUTH) {
+        // Production mode: the SSE feed is caretaker-authorized. The demo keeps
+        // it public (the Blind Client connects without credentials).
+        try {
+            const session = await requireCaretakerSession(req, res);
+            if (!session) return; // error already sent
+        } catch (err) {
+            return next(err);
+        }
+    }
+
+    if (sseClients.size >= SSE_MAX_CLIENTS) {
+        return res.status(503).json({ error: 'Too many connections — try again shortly.' });
+    }
+
     res.set({
         'Content-Type': 'text/event-stream',
         'Cache-Control': 'no-cache',
@@ -1196,5 +1322,6 @@ module.exports = {
     EVENTS_WINDOW_MAX,
     TELEMETRY_QUEUE_MAX,
     scopeRuntimeStateForDevice,
-    EVENT_MESSAGE_MAX
+    EVENT_MESSAGE_MAX,
+    getSseClientCount
 };

@@ -78,6 +78,40 @@ Wall-E conversations. This is enforced on the backend:
   events. An **unknown** MQTT device identifier is never attached to any user — it stays
   unbound and appears only in the unscoped view.
 
+### Production hardening (Stage 8B)
+
+Security hardening that does **not** change the demo experience by default but adds
+production-grade controls:
+
+- **`REQUIRE_AUTH_FOR_READS=false` by default.** When set to `true`, the endpoints that
+  are normally public — `GET /api/events`, `GET /api/location`, `GET /api/events/stream`,
+  `GET /api/health`, `GET /api/buzzer` — require an authenticated **CARETAKER** session
+  cookie (`401` anonymous, `403` non-caretaker). Scoped reads (`?blindUserId=`) already
+  required this regardless. **Effect on clients:** the caretaker dashboard works either
+  way; the **Blind Client's live EventSource feed (and the phone app's public health/location
+  polls) break when the switch is on**, so enabling it is a production-only decision. The
+  demo console keeps the default.
+- **HTTP security headers** on every response (no new dependency): `X-Content-Type-Options:
+  nosniff`, `X-Frame-Options: DENY`, `Referrer-Policy: no-referrer`, and
+  `Strict-Transport-Security` only when `NODE_ENV=production` or the request arrived over
+  HTTPS. A **Content-Security-Policy is deferred**: the static frontend uses inline scripts
+  and CDN assets (Leaflet via unpkg with SRI, Google Fonts) and would need frontend
+  restructuring before a safe policy can be applied.
+- **Per-device write rate limits** for `POST /api/events`, `POST /api/location`,
+  `POST /api/buzzer`, keyed on the **authenticated device identity** (not the client IP),
+  so one device's burst can never exhaust another's budget. Exceeding the limit returns
+  `429`. Defaults (`DEVICE_EVENTS_RATE_MAX=120`, `DEVICE_LOCATION_RATE_MAX=120`,
+  `DEVICE_BUZZER_RATE_MAX=60` per minute) sit well above normal paired-sensor telemetry.
+  The MQTT ingestion pipeline is untouched by these REST limits.
+- **SSE connection cap** — `SSE_MAX_CLIENTS` (default 30) concurrent streams per instance;
+  excess connections get a clean `503` and disconnected clients are removed from the count.
+- **`TRUST_PROXY`** for `req.ip`/rate limiting behind a reverse proxy. Accepted values are
+  a positive integer hop count or `loopback`/`linklocal`/`uniquelocal`; arbitrary values
+  are **rejected** and the backend falls back to no proxy trust. Rate limiting remains
+  **in-memory and per-instance** — never globally distributed.
+
+All of these are configured in `.env.example`.
+
 See `API_CONTRACT.md` for the full request/response contract.
 
 ## Architecture
@@ -136,7 +170,8 @@ Security rules implemented:
 - The plaintext token is never returned by any `GET`, never logged, never sent in a URL.
 - Device `last_seen_at` is throttled via `DEVICE_TOUCH_THROTTLE_MS` (default 5 min).
 - Device identity is a **Blind Client concern**; the live SSE feed (`/api/events/stream`)
-  stays public this stage for the caretaker console.
+  stays public in the demo default and is caretaker-gated only when `REQUIRE_AUTH_FOR_READS`
+  is enabled (see "Production hardening").
 
 **ESP32 note:** per-device MQTT credentials + broker ACLs are the *future* hardening step;
 the current MQTT bridge topics and the ESP firmware (hardcoded credentials) are unchanged.
@@ -176,6 +211,9 @@ npm run test:stage3    # Stage 3 — monitored users & caretaker authorization
 npm run test:stage4    # Stage 4 — device pairing & blind-client authentication
 npm run test:stage5    # Stage 5 — telemetry persistence & boot rehydration
 npm run test:stage6    # Stage 6 — multi-user dashboard scoping & isolation
+npm run test:stage8a   # Stage 8A — application security fixes (regression)
+npm run test:stage8b   # Stage 8B — production hardening (read auth, headers,
+                       #   per-device rate limits, SSE cap, trust proxy)
 ```
 
 ## MQTT (optional)

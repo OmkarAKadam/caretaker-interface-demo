@@ -3,6 +3,10 @@
 // Minimal in-memory sliding-window rate limiter for the authentication routes.
 // The Wall-E chat route already uses this exact pattern inline in server.js;
 // reuse it here rather than introducing a new rate-limiting system.
+//
+// Stage 8B: an optional `key` option selects the bucket key (e.g. an
+// authenticated device identifier) instead of the default req.ip, so per-client
+// protection can be keyed on an identity the server already verified.
 
 const DEFAULT_MAX = (() => {
     const raw = parseInt(process.env.AUTH_RATE_MAX, 10);
@@ -20,18 +24,19 @@ function createRateLimiter(options) {
     const opts = options || {};
     const max = Number.isFinite(opts.max) ? opts.max : DEFAULT_MAX;
     const windowMs = Number.isFinite(opts.windowMs) ? opts.windowMs : DEFAULT_WINDOW_MS;
+    const keyFor = typeof opts.key === 'function' ? opts.key : (req) => req.ip || 'unknown';
 
     const buckets = new Map();
     let callsSinceCleanup = 0;
 
     return function rateLimit(req, res, next) {
-        const ip = req.ip || 'unknown';
+        const key = keyFor(req, res);
         const now = Date.now();
 
-        let bucket = buckets.get(ip);
+        let bucket = buckets.get(key);
         if (!bucket || bucket.windowStart + windowMs <= now) {
             bucket = { windowStart: now, count: 0 };
-            buckets.set(ip, bucket);
+            buckets.set(key, bucket);
         }
         bucket.count += 1;
 
