@@ -261,6 +261,18 @@ const EMAIL_A = `${PREFIX}${ts}-caretaker-a@test.local`;
 const EMAIL_B = `${PREFIX}${ts}-caretaker-b@test.local`;
 const PASSWORD = 'CorrectHorse42!';
 
+// Phase 2 runs the hardware write-rate checks against a TEST-ONLY window that is
+// comfortably above the total latency of the burst (each device-authenticated
+// write costs ~100–150 ms of bcrypt + a DB write). A window of 10 s guarantees
+// the whole exceeding-burst lands in ONE limiter window on any machine, so the
+// overflow checks are deterministic; a shorter window (as seen with 1500 ms)
+// lets the sliding window legitimately roll over mid-burst and yields spurious
+// 201/200 instead of the expected 429. The rollover check below sleeps for
+// window + 1 s so expiry is real. These envs affect ONLY the in-process harness;
+// the production defaults in .env.example are untouched.
+const DEVICE_WINDOW_MS = 10000;
+const DEVICE_ROLLOVER_WAIT_MS = DEVICE_WINDOW_MS + 1000;
+
 const SID_X = `${PREFIX}${ts}-xsess`;
 const SID_Y = `${PREFIX}${ts}-ysess`;
 
@@ -401,7 +413,7 @@ async function phase2Hardened() {
     assertStatus('C: devY buzzer over max → 429', res.status, 429);
 
     // devX events bucket rolls over once the window elapses.
-    await new Promise((r) => setTimeout(r, 1700));
+    await new Promise((r) => setTimeout(r, DEVICE_ROLLOVER_WAIT_MS));
     res = await postJson('/api/events', eventPayload(`${PREFIX}${ts}-ev-after`), deviceHeaders(devX.identifier, devX.token));
     assertStatus('C: devX events window rolled over → 201', res.status, 201);
 
@@ -531,7 +543,7 @@ async function main() {
 
         console.log('[test] phase 2 — hardened mode (REQUIRE_AUTH_FOR_READS=true)');
         await stopHttp();
-        await reloadServer({ REQUIRE_AUTH_FOR_READS: 'true', SSE_MAX_CLIENTS: '3', DEVICE_WRITE_RATE_WINDOW_MS: '1500', DEVICE_EVENTS_RATE_MAX: '6', DEVICE_LOCATION_RATE_MAX: '8', DEVICE_BUZZER_RATE_MAX: '3' });
+        await reloadServer({ REQUIRE_AUTH_FOR_READS: 'true', SSE_MAX_CLIENTS: '3', DEVICE_WRITE_RATE_WINDOW_MS: String(DEVICE_WINDOW_MS), DEVICE_EVENTS_RATE_MAX: '6', DEVICE_LOCATION_RATE_MAX: '8', DEVICE_BUZZER_RATE_MAX: '3' });
         await startHttp();
         testFrontendXssGuard();
         const state = await phase2Hardened();
