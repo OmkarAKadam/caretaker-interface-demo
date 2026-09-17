@@ -1,13 +1,14 @@
 'use strict';
 
 const express = require('express');
-const { isValidUuid } = require('../auth/password');
+const { isValidUuid, normalizeEmail, isValidEmail, safeUser } = require('../auth/password');
 const {
     requireAuth,
     requireRole
 } = require('../auth/middleware');
 const {
     findBlindUserById,
+    findBlindUserByEmail,
     listAuthorizedBlindUsers,
     linkRelationship,
     deactivateRelationship
@@ -30,6 +31,31 @@ router.get('/blind-users', async (req, res, next) => {
             relationshipStatus: row.relationship_status
         }));
         return res.status(200).json({ blindUsers });
+    } catch (err) {
+        next(err);
+    }
+});
+
+// POST /api/caretaker/lookup-user — resolve an existing blind user by email.
+// Enables re-linking a user whose relationship was previously deactivated. The
+// body carries only the email; the response is the safe (public) user shape.
+router.post('/lookup-user', async (req, res, next) => {
+    try {
+        if (!req.body || typeof req.body !== 'object' || Array.isArray(req.body)) {
+            return res.status(400).json({ error: 'Request body must be a JSON object' });
+        }
+
+        const email = normalizeEmail(req.body.email);
+        if (!isValidEmail(email)) {
+            return res.status(400).json({ error: 'A valid email is required' });
+        }
+
+        const blindUser = await findBlindUserByEmail(email);
+        if (!blindUser) {
+            return res.status(404).json({ error: 'Blind user not found' });
+        }
+
+        return res.status(200).json({ user: safeUser(blindUser) });
     } catch (err) {
         next(err);
     }

@@ -15,6 +15,7 @@ const { hashSessionToken, findSessionByTokenHash } = require('./auth/sessions');
 const { isValidUuid } = require('./auth/password');
 const { requireDeviceAuth } = require('./devices/middleware');
 const devicesRouter = require('./devices/routes');
+const deviceQueries = require('./devices/queries');
 const queries = require('./telemetry/queries');
 const { createPersistenceQueue } = require('./telemetry/queue');
 const { createRateLimiter } = require('./auth/rate-limit');
@@ -99,7 +100,7 @@ const events = new Map();
 let latestLocation = null;
 let latestDeviceStatus = null;
 let latestFall = null;
-let latestBuzzerState = null;
+let latestBuzzerState = null; // { state: 'ON'|'OFF', deviceId, updatedAt }
 let lastHeartRate = null;
 let mqttSeq = 0;
 
@@ -473,8 +474,20 @@ function handleSosMessage(payload) {
     }
 }
 
-function handleLocationMessage(payload) {
-    const result = storeLocation(payload);
+async function handleLocationMessage(payload) {
+    let device = null;
+    const deviceId = payload && typeof payload.deviceId === 'string' && payload.deviceId.trim();
+    if (deviceId) {
+        try {
+            const row = await queries.getDeviceByIdentifier(deviceId);
+            if (row) {
+                device = { identifier: row.device_identifier, blindUserId: row.blind_user_id };
+            }
+        } catch (_err) {
+            // DB unavailable — store unattributed; scoping will omit it.
+        }
+    }
+    const result = storeLocation(payload, device);
     if (result.ok) {
         console.log('[MQTT] Location update received');
     } else {
@@ -647,13 +660,17 @@ const BUZZER_COMMANDS = Object.freeze({
     BUZZER_OFF: 'BUZZER_OFF'
 });
 
-function publishBuzzerCommand(command) {
+function publishBuzzerCommand(command, deviceId) {
     const published = mqttClient.publish(TOPICS.DEVICE_COMMAND, {
         command,
         issuedAt: new Date().toISOString()
     });
     if (published) {
-        latestBuzzerState = command === BUZZER_COMMANDS.BUZZER_ON ? 'ON' : 'OFF';
+        latestBuzzerState = {
+            state: command === BUZZER_COMMANDS.BUZZER_ON ? 'ON' : 'OFF',
+            deviceId: deviceId || null,
+            updatedAt: new Date().toISOString()
+        };
         persistLatestStateBestEffort();
     }
     return published;
@@ -713,6 +730,44 @@ async function requireScopedBlindUser(req, res) {
     return blindUserId;
 }
 
+// Stage 9: optional per-device scoping for the read endpoints. blindUserId must
+// already be validated + authorized by requireScopedBlindUser. When a deviceId
+// query parameter is present it must match one of that blind user's registered
+// device identifiers, otherwise the same indistinguishable 404 a missing device
+// receives is returned (no existence leak across users). Returns undefined (no
+// filter), the validated device identifier string, or null (an error response
+// was already sent). If the ownership check cannot reach the database, the
+// filter is still applied to whichever data path the caller handles — that path
+// is already narrowed by the authorized blindUserId, so the device predicate
+// can only narrow data further, never broaden it.
+async function requireScopedDevice(req, res, blindUserId) {
+    const raw = req.query.deviceId;
+    if (raw === undefined || raw === null || raw === '') return undefined;
+    if (typeof raw !== 'string') {
+        res.status(400).json({ error: 'deviceId must be a single value' });
+        return null;
+    }
+    const deviceId = raw.trim();
+    if (deviceId === '') return undefined;
+    if (blindUserId === undefined || blindUserId === null) {
+        res.status(400).json({ error: 'deviceId filtering requires blindUserId' });
+        return null;
+    }
+    try {
+        const rows = await deviceQueries.listDevicesForBlindUser(blindUserId);
+        if (!rows || !rows.some((row) => row.device_identifier === deviceId)) {
+            res.status(404).json({ error: 'Device not found' });
+            return null;
+        }
+    } catch (err) {
+        console.warn(
+            '[Scoping] Device-ownership check unavailable; device filter still applied to authorized data:',
+            err && err.message ? err.message : err
+        );
+    }
+    return deviceId;
+}
+
 app.get('/api/health', async (req, res, next) => {
     if (REQUIRE_READ_AUTH) {
         try {
@@ -731,9 +786,14 @@ app.get('/api/health', async (req, res, next) => {
 
 app.get('/api/events', async (req, res, next) => {
     let blindUserId;
+    let scopedDeviceId;
     try {
         blindUserId = await requireScopedBlindUser(req, res);
         if (blindUserId === null) return; // error already sent
+        // A supplied deviceId is never silently ignored: it requires an
+        // authorized blindUserId context, otherwise it is rejected (400).
+        scopedDeviceId = await requireScopedDevice(req, res, blindUserId);
+        if (scopedDeviceId === null) return; // error already sent
     } catch (err) {
         // Auth itself depends on the database; when it is unreachable there is
         // no way to authorize scoping, so fail closed rather than fall back.
@@ -753,8 +813,11 @@ app.get('/api/events', async (req, res, next) => {
     let rows;
     try {
         if (blindUserId !== undefined) {
-            // Scoped: only events belonging to the authorized blind user.
-            rows = await queries.listRecentEventsForBlindUser(blindUserId, EVENTS_WINDOW_MAX);
+            // Scoped: only events belonging to the authorized blind user,
+            // optionally narrowed to one of their registered devices.
+            rows = scopedDeviceId !== undefined
+                ? await queries.listRecentEventsForDevice(blindUserId, scopedDeviceId, EVENTS_WINDOW_MAX)
+                : await queries.listRecentEventsForBlindUser(blindUserId, EVENTS_WINDOW_MAX);
         } else {
             // Unscoped (backward-compatible).
             rows = await queries.listRecentEvents(EVENTS_WINDOW_MAX);
@@ -763,16 +826,22 @@ app.get('/api/events', async (req, res, next) => {
         console.warn('[Persistence] GET /api/events fell back to memory:', err && err.message ? err.message : err);
         if (blindUserId !== undefined) {
             // DB down + already authorized: in-memory fallback stays scoped.
-            const mem = Array.from(events.values()).filter((e) => e.blindUserId === blindUserId);
+            let mem = Array.from(events.values()).filter((e) => e.blindUserId === blindUserId);
+            if (scopedDeviceId !== undefined) {
+                mem = mem.filter((e) => e.deviceId === scopedDeviceId);
+            }
             return res.status(200).json(mem.slice(-EVENTS_WINDOW_MAX));
         }
         return res.status(200).json(Array.from(events.values()).slice(-EVENTS_WINDOW_MAX));
     }
 
     if (rows.length === 0 && events.size > 0) {
-        const mem = blindUserId !== undefined
+        let mem = blindUserId !== undefined
             ? Array.from(events.values()).filter((e) => e.blindUserId === blindUserId)
             : Array.from(events.values());
+        if (scopedDeviceId !== undefined) {
+            mem = mem.filter((e) => e.deviceId === scopedDeviceId);
+        }
         if (mem.length > 0) {
             return res.status(200).json(mem.slice(-EVENTS_WINDOW_MAX));
         }
@@ -784,13 +853,21 @@ app.get('/api/location', async (req, res, next) => {
     try {
         const blindUserId = await requireScopedBlindUser(req, res);
         if (blindUserId === null) return;
+        // A supplied deviceId is never silently ignored: it requires an
+        // authorized blindUserId context, otherwise it is rejected (400).
+        const scopedDeviceId = await requireScopedDevice(req, res, blindUserId);
+        if (scopedDeviceId === null) return; // error already sent
         if (blindUserId === undefined && REQUIRE_READ_AUTH) {
             // Production mode: the unscoped legacy-read form is no longer public.
             const session = await requireCaretakerSession(req, res);
             if (!session) return;
         }
         if (blindUserId !== undefined) {
-            if (latestLocation && latestLocation.blindUserId === blindUserId) {
+            const matchesUser = latestLocation && latestLocation.blindUserId === blindUserId;
+            const matchesDevice = scopedDeviceId !== undefined
+                ? latestLocation && latestLocation.deviceId === scopedDeviceId
+                : true;
+            if (matchesUser && matchesDevice) {
                 return res.status(200).json(latestLocation);
             }
             return res.status(200).json({ latitude: null, longitude: null, timestamp: null });
@@ -825,6 +902,20 @@ app.post('/api/events', requireDeviceAuth, deviceEventsLimiter, async (req, res,
 
     if (!result.ok) {
         return res.status(result.status).json({ error: result.error });
+    }
+
+    // A demo/MQTT event may carry a heart-rate reading. Fold it into the
+    // Wall-E runtime state (attributed to this device) so the AI context and
+    // the caretaker dashboard see it; this mirrors handleHeartRateMessage.
+    const hr = result.event.heartRate;
+    if (typeof hr === 'number' && Number.isFinite(hr) && hr > 0 && hr <= 400) {
+        lastHeartRate = {
+            deviceId: req.device.identifier,
+            heartRate: hr,
+            timestamp: result.event.timestamp || new Date().toISOString(),
+            receivedAt: new Date().toISOString()
+        };
+        persistLatestStateBestEffort();
     }
 
     // 201 ⇒ durable-in-DB or queued-for-retry; never throws.
@@ -922,7 +1013,7 @@ app.post('/api/buzzer', requireDeviceAuth, deviceBuzzerLimiter, (req, res) => {
         });
     }
 
-    const published = publishBuzzerCommand(command);
+    const published = publishBuzzerCommand(command, req.device && req.device.identifier);
     if (!published) {
         return res.status(503).json({ error: 'Buzzer command not sent — MQTT publish failed.' });
     }
@@ -944,7 +1035,7 @@ app.get('/api/buzzer', async (req, res, next) => {
         }
     }
     return res.status(200).json({
-        state: latestBuzzerState,
+        state: latestBuzzerState ? latestBuzzerState.state : null,
         commandTopic: TOPICS.DEVICE_COMMAND,
         mqtt: mqttClient.getState()
     });
@@ -1028,9 +1119,11 @@ function scopeRuntimeStateForDevice(device, runtimeState) {
     const scoped = {};
     if (!device || !identifier || !blindUserId) return scoped;
 
+    // Location is attributed to a specific device identifier; only the
+    // authenticated device's own latest location is shared with Wall-E (a blind
+    // user's sibling device is a different device and stays private).
     if (runtimeState.latestLocation &&
-        (runtimeState.latestLocation.deviceId === identifier ||
-         runtimeState.latestLocation.blindUserId === blindUserId)) {
+        runtimeState.latestLocation.deviceId === identifier) {
         scoped.latestLocation = runtimeState.latestLocation;
     }
     if (runtimeState.latestDeviceStatus &&
@@ -1044,6 +1137,11 @@ function scopeRuntimeStateForDevice(device, runtimeState) {
     if (runtimeState.latestFall &&
         runtimeState.latestFall.deviceId === identifier) {
         scoped.latestFall = runtimeState.latestFall;
+    }
+    if (runtimeState.latestBuzzerState &&
+        typeof runtimeState.latestBuzzerState === 'object' &&
+        runtimeState.latestBuzzerState.deviceId === identifier) {
+        scoped.latestBuzzerState = runtimeState.latestBuzzerState;
     }
     return scoped;
 }
@@ -1074,10 +1172,12 @@ app.post('/api/walle/chat', requireDeviceAuth, async (req, res) => {
     }
 
     // Only context that belongs to the authenticated device reaches Wall-E:
-    // its own events plus location/status/heart-rate scoped to its identity.
+    // its OWN events plus location/status/heart-rate scoped to its device
+    // identity. A sibling device's events for the same blind user are NOT
+    // shared — per-device trust, not per-user trust.
     const deviceEvents = new Map();
     for (const [alertId, event] of events.entries()) {
-        if (event.deviceId === req.device.identifier || event.blindUserId === req.device.blindUserId) {
+        if (event.deviceId === req.device.identifier) {
             deviceEvents.set(alertId, event);
         }
     }
@@ -1103,7 +1203,8 @@ app.post('/api/walle/chat', requireDeviceAuth, async (req, res) => {
             latestLocation,
             latestDeviceStatus,
             lastHeartRate,
-            latestFall
+            latestFall,
+            latestBuzzerState
         }),
         { events: deviceEvents }
     ));
@@ -1121,8 +1222,8 @@ app.post('/api/walle/chat', requireDeviceAuth, async (req, res) => {
     try {
         const result = await chatWithFallback({
             messages,
-            temperature: 0.2,
-            maxTokens: 200
+            temperature: 0.4,
+            maxTokens: 350
         });
         conversationStore.addAssistantMessage(sessionId, result.reply, result.model);
         return res.status(200).json({
@@ -1148,8 +1249,17 @@ app.get('/api/walle/sessions', async (req, res, next) => {
         const blindUserId = await requireScopedBlindUser(req, res);
         if (blindUserId === null) return;
         if (blindUserId !== undefined) {
-            return res.status(200).json(conversationStore.getSessionSummaries({ blindUserId }));
+            const scopedDeviceId = await requireScopedDevice(req, res, blindUserId);
+            if (scopedDeviceId === null) return; // error already sent
+            const filter = scopedDeviceId !== undefined
+                ? { blindUserId, deviceId: scopedDeviceId }
+                : { blindUserId };
+            return res.status(200).json(conversationStore.getSessionSummaries(filter));
         }
+        // deviceId without blindUserId is rejected (a device filter must always
+        // carry its authorized blind-user context).
+        const deviceParamOnly = await requireScopedDevice(req, res, undefined);
+        if (deviceParamOnly === null) return; // error already sent
         // Stage 8A: the unscoped listing is no longer public. It now requires
         // an authenticated CARETAKER; unauthenticated callers get 401/403 and
         // never see session summaries or message previews.
@@ -1193,6 +1303,109 @@ app.get('/api/walle/history/:sessionId', async (req, res, next) => {
             return res.status(404).json({ error: 'Session not found' });
         }
         return res.status(200).json(transcript);
+    } catch (err) {
+        return next(err);
+    }
+});
+
+// ── Stage 9: caretaker-authorized simulation ──────────────────────────────
+// The caretaker dashboard's demo controls may place an event into the backend
+// hot path (events + Wall-E heart-rate context) for the SELECTED device of an
+// authorized blind user. Identity is always derived from the database, never
+// from the client. This is a bounded demo affordance: it requires a caretaker
+// session AND an ACTIVE relationship to the device's owner, and it is rate
+// limited per caretaker account.
+
+const CARETAKER_SIM_RATE_MAX = 60;
+const CARETAKER_SIM_RATE_WINDOW_MS = 60 * 1000;
+const caretakerSimLimiter = createRateLimiter({
+    max: CARETAKER_SIM_RATE_MAX,
+    windowMs: CARETAKER_SIM_RATE_WINDOW_MS,
+    key: (req) => (req.auth && req.auth.user && req.auth.user.id) || 'unknown'
+});
+
+const SIM_ALERT_ID_PATTERN = /^[A-Za-z0-9._:-]{1,64}$/;
+
+app.post('/api/caretaker/simulate-event', requireAuth, requireRole('CARETAKER'), caretakerSimLimiter, async (req, res, next) => {
+    try {
+        const body = req.body || {};
+        if (typeof body !== 'object' || Array.isArray(body)) {
+            return res.status(400).json({ error: 'Request body must be a JSON object' });
+        }
+
+        const deviceId = typeof body.deviceId === 'string' ? body.deviceId.trim() : '';
+        if (!isValidUuid(deviceId)) {
+            return res.status(400).json({ error: 'deviceId must be a registered device id' });
+        }
+        const deviceRow = await deviceQueries.getDeviceById(deviceId);
+        if (!deviceRow) {
+            return res.status(404).json({ error: 'Device not found' });
+        }
+        const allowed = await hasActiveRelationship(req.auth.user.id, deviceRow.blind_user_id);
+        if (!allowed) {
+            return res.status(404).json({ error: 'Device not found' });
+        }
+
+        const trigger = typeof body.trigger === 'string' ? body.trigger.toUpperCase() : '';
+        if (!VALID_TRIGGERS.includes(trigger)) {
+            return res.status(400).json({ error: 'Invalid trigger' });
+        }
+        if (trigger === 'NORMAL' ||
+            trigger === 'OBSTACLE_LEFT' || trigger === 'OBSTACLE_CENTER' || trigger === 'OBSTACLE_RIGHT') {
+            return res.status(400).json({ error: 'This trigger cannot be simulated through the caretaker console' });
+        }
+
+        let heartRate = null;
+        if (trigger === 'HEART_RATE' || trigger === 'SOS_AND_HEART_RATE') {
+            const hr = body.heartRate;
+            if (typeof hr !== 'number' || !Number.isFinite(hr) || hr <= 0 || hr > 400) {
+                return res.status(400).json({ error: 'heartRate must be a number between 1 and 400 for this trigger' });
+            }
+            heartRate = hr;
+        }
+
+        if (!isValidLatitude(body.latitude) || !isValidLongitude(body.longitude)) {
+            return res.status(400).json({ error: 'latitude and longitude are required' });
+        }
+
+        const alertId = (typeof body.alertId === 'string' && SIM_ALERT_ID_PATTERN.test(body.alertId.trim()))
+            ? body.alertId.trim()
+            : `SIM-${Date.now()}-${Math.floor(Math.random() * 100000)}`;
+
+        const event = {
+            alertId,
+            trigger,
+            status: 'ACTIVE',
+            heartRate,
+            latitude: body.latitude,
+            longitude: body.longitude,
+            timestamp: isValidTimestamp(body.timestamp) ? body.timestamp : new Date().toISOString(),
+            source: 'DEMO',
+            deviceId: deviceRow.device_identifier,
+            blindUserId: deviceRow.blind_user_id
+        };
+
+        const result = createEvent(event);
+        if (!result.ok) {
+            return res.status(result.status).json({ error: result.error });
+        }
+
+        // Mirror the device-authored POST /api/events heart-rate fold so Wall-E
+        // context and the caretaker dashboard see the newest reading for this
+        // exact device.
+        const hrValue = result.event.heartRate;
+        if (typeof hrValue === 'number' && Number.isFinite(hrValue) && hrValue > 0 && hrValue <= 400) {
+            lastHeartRate = {
+                deviceId: deviceRow.device_identifier,
+                heartRate: hrValue,
+                timestamp: result.event.timestamp || new Date().toISOString(),
+                receivedAt: new Date().toISOString()
+            };
+            persistLatestStateBestEffort();
+        }
+
+        await persistEventBestEffort(result.event);
+        return res.status(result.status).json(result.event);
     } catch (err) {
         return next(err);
     }

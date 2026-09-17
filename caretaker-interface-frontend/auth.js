@@ -18,6 +18,7 @@ const AUTH_LOGOUT_ENDPOINT = `${AUTH_API_BASE_URL}/api/auth/logout`;
 const AUTH_ME_ENDPOINT = `${AUTH_API_BASE_URL}/api/auth/me`;
 const BLIND_USERS_ENDPOINT = `${AUTH_API_BASE_URL}/api/blind-users`;
 const CARETAKER_BLIND_USERS_ENDPOINT = `${AUTH_API_BASE_URL}/api/caretaker/blind-users`;
+const CARETAKER_LOOKUP_ENDPOINT = `${AUTH_API_BASE_URL}/api/caretaker/lookup-user`;
 const DEVICES_ENDPOINT = `${AUTH_API_BASE_URL}/api/devices`;
 
 const AUTH_FETCH_INIT = { credentials: 'include' };
@@ -123,6 +124,16 @@ async function deactivateBlindUserRelationship(blindUserId) {
     });
 }
 
+// POST /api/caretaker/lookup-user — resolve an existing blind-user identity by
+// email. Resolves { user }; used to re-link a previously deactivated relation.
+async function lookupBlindUserByEmail(email) {
+    return authApiFetch(CARETAKER_LOOKUP_ENDPOINT, {
+        method: 'POST',
+        headers: { 'Accept': 'application/json' },
+        body: { email }
+    });
+}
+
 /* ── Device (assistive cap) management ───────────────────────────── */
 
 // GET /api/devices?blindUserId=<uuid> — devices of one linked blind user.
@@ -148,6 +159,25 @@ async function rotateDeviceToken(deviceId) {
     return authApiFetch(`${DEVICES_ENDPOINT}/${encodeURIComponent(deviceId)}/rotate`, {
         method: 'POST',
         headers: { 'Accept': 'application/json' }
+    });
+}
+
+// DELETE /api/devices/:deviceId — permanently unlink a registered cap device.
+async function deleteDevice(deviceId) {
+    return authApiFetch(`${DEVICES_ENDPOINT}/${encodeURIComponent(deviceId)}`, {
+        method: 'DELETE',
+        headers: { 'Accept': 'application/json' }
+    });
+}
+
+// POST /api/caretaker/simulate-event — caretaker-authorized demo event for the
+// SELECTED device of a monitored user. Feeds the backend hot path so Wall-E
+// context and the dashboard reflect the simulation for exactly that device.
+async function simulateCaretakerEvent(payload) {
+    return authApiFetch(`${AUTH_API_BASE_URL}/api/caretaker/simulate-event`, {
+        method: 'POST',
+        headers: { 'Accept': 'application/json' },
+        body: payload
     });
 }
 
@@ -209,10 +239,12 @@ async function rotateDeviceToken(deviceId) {
     if (tabLogin) tabLogin.addEventListener('click', () => showTab('login'));
     if (tabRegister) tabRegister.addEventListener('click', () => showTab('register'));
 
-    // Session check: if already authenticated, skip the login page entirely.
+    // Session check: if already authenticated, redirect based on role.
     checkCurrentUser()
         .then((body) => {
-            if (body && body.user) window.location.replace('index.html');
+            if (!body || !body.user) return;
+            if (body.user.role === 'BLIND_USER') window.location.replace('blind-client/index.html');
+            else window.location.replace('index.html');
         })
         .catch(() => { /* not authenticated — show the form */ });
 
@@ -230,8 +262,12 @@ async function rotateDeviceToken(deviceId) {
 
             setBusy(loginSubmit, true, 'Signing in…');
             try {
-                await loginCaretaker(email, password);
-                window.location.replace('index.html');
+                const result = await loginCaretaker(email, password);
+                if (result && result.user && result.user.role === 'BLIND_USER') {
+                    window.location.replace('blind-client/index.html');
+                } else {
+                    window.location.replace('index.html');
+                }
             } catch (err) {
                 setBusy(loginSubmit, false, 'Sign In');
                 setError(loginError, err.message || 'Sign in failed. Please try again.');

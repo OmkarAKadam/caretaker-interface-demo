@@ -2,7 +2,7 @@
 
 const crypto = require('crypto');
 const { query } = require('../db/pool');
-const { hashPassword, isValidUuid } = require('../auth/password');
+const { hashPassword, isValidUuid, normalizeEmail, isValidEmail } = require('../auth/password');
 
 const BLIND_USER_ROLE = 'BLIND_USER';
 const RELATIONSHIP_ACTIVE = 'ACTIVE';
@@ -163,6 +163,21 @@ async function findBlindUserById(blindUserId) {
     return result.rows[0] || null;
 }
 
+// Resolve an existing blind-user identity by email. Used to re-link a user
+// whose relationship was previously deactivated. Returns null when no match.
+async function findBlindUserByEmail(email) {
+    if (!isValidEmail(email)) {
+        return null;
+    }
+    const result = await query(
+        `SELECT id, name, email, role
+         FROM users
+         WHERE email = $1 AND role = $2`,
+        [normalizeEmail(email), BLIND_USER_ROLE]
+    );
+    return result.rows[0] || null;
+}
+
 module.exports = {
     BLIND_USER_ROLE,
     RELATIONSHIP_ACTIVE,
@@ -173,5 +188,6 @@ module.exports = {
     updateBlindUser,
     linkRelationship,
     deactivateRelationship,
-    findBlindUserById
+    findBlindUserById,
+    findBlindUserByEmail
 };

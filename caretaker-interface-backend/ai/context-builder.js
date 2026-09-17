@@ -4,6 +4,7 @@ const LOCATION_FRESHNESS_MS = 5 * 60 * 1000;
 const DEVICE_STATUS_FRESHNESS_MS = 2 * 60 * 1000;
 const HEART_RATE_FRESHNESS_MS = 2 * 60 * 1000;
 const OBSTACLE_FRESHNESS_MS = 30 * 1000;
+const FALL_FRESHNESS_MS = 10 * 60 * 1000;
 
 const OBSTACLE_TRIGGERS = new Set(['OBSTACLE_LEFT', 'OBSTACLE_CENTER', 'OBSTACLE_RIGHT']);
 
@@ -31,19 +32,18 @@ function formatAge(seconds) {
 function buildTrustedContext(state) {
     const lines = [];
 
-    if (state.latestLocation &&
-        typeof state.latestLocation.latitude === 'number' &&
-        typeof state.latestLocation.longitude === 'number' &&
-        state.latestLocation.timestamp) {
-        const age = ageSeconds(state.latestLocation.timestamp);
-        if (age !== null && age <= LOCATION_FRESHNESS_MS / 1000) {
-            const lat = state.latestLocation.latitude;
-            const lng = state.latestLocation.longitude;
-            const ageStr = formatAge(age);
-            lines.push('Location: ' + lat + ', ' + lng + (ageStr ? ' (' + ageStr + ')' : ''));
-        }
+    // ── SOS (checked FIRST so active emergencies are never hidden) ──
+    let sosActive = false;
+    if (state.events && typeof state.events.forEach === 'function') {
+        state.events.forEach(function (event) {
+            if (EMERGENCY_TRIGGERS.has(event.trigger) && event.status === 'ACTIVE') {
+                sosActive = true;
+            }
+        });
     }
+    lines.push('SOS active: ' + (sosActive ? 'yes' : 'no'));
 
+    // ── Device status ──
     if (state.latestDeviceStatus &&
         typeof state.latestDeviceStatus.status === 'string' &&
         state.latestDeviceStatus.status.trim() !== '') {
@@ -57,8 +57,25 @@ function buildTrustedContext(state) {
             if (ageStr) deviceLine += ' (' + ageStr + ')';
             lines.push(deviceLine);
         }
+    } else {
+        lines.push('Device: unavailable');
     }
 
+    // ── Location ──
+    if (state.latestLocation &&
+        typeof state.latestLocation.latitude === 'number' &&
+        typeof state.latestLocation.longitude === 'number' &&
+        state.latestLocation.timestamp) {
+        const age = ageSeconds(state.latestLocation.timestamp);
+        if (age !== null && age <= LOCATION_FRESHNESS_MS / 1000) {
+            const lat = state.latestLocation.latitude;
+            const lng = state.latestLocation.longitude;
+            const ageStr = formatAge(age);
+            lines.push('Location: ' + lat + ', ' + lng + (ageStr ? ' (' + ageStr + ')' : ''));
+        }
+    }
+
+    // ── Heart rate ──
     if (state.lastHeartRate &&
         typeof state.lastHeartRate.heartRate === 'number' &&
         state.lastHeartRate.heartRate > 0) {
@@ -69,10 +86,17 @@ function buildTrustedContext(state) {
         }
     }
 
-    if (state.latestBuzzerState === 'ON' || state.latestBuzzerState === 'OFF') {
-        lines.push('Buzzer: ' + state.latestBuzzerState);
+    // ── Buzzer (only if safely attributed to this device) ──
+    if (state.latestBuzzerState && typeof state.latestBuzzerState === 'object') {
+        if (state.latestBuzzerState.state === 'ON' || state.latestBuzzerState.state === 'OFF') {
+            const ageStr = state.latestBuzzerState.updatedAt
+                ? formatAge(ageSeconds(state.latestBuzzerState.updatedAt))
+                : null;
+            lines.push('Buzzer: ' + state.latestBuzzerState.state + (ageStr ? ' (' + ageStr + ')' : ''));
+        }
     }
 
+    // ── Recent obstacles (max 3, sorted by recency) ──
     if (state.events && typeof state.events.forEach === 'function') {
         const obstacleMaxAgeSec = OBSTACLE_FRESHNESS_MS / 1000;
 
@@ -80,10 +104,22 @@ function buildTrustedContext(state) {
         state.events.forEach(function (event) {
             if (!OBSTACLE_TRIGGERS.has(event.trigger)) return;
             const age = ageSeconds(event.timestamp);
-            if (age !== null && age <= obstacleMaxAgeSec && typeof event.distance === 'number') {
+            if (age === null || age > obstacleMaxAgeSec) return;
+
+            const direction = DIRECTION_LABEL[event.trigger] || event.trigger;
+
+            if (typeof event.distance === 'number') {
+                const distanceM = (event.distance / 100).toFixed(1);
                 recentObstacles.push({
-                    direction: DIRECTION_LABEL[event.trigger] || event.trigger,
-                    distance: event.distance,
+                    direction: direction,
+                    distanceM: distanceM,
+                    hasDistance: true,
+                    age: age
+                });
+            } else {
+                recentObstacles.push({
+                    direction: direction,
+                    hasDistance: false,
                     age: age
                 });
             }
@@ -97,15 +133,21 @@ function buildTrustedContext(state) {
 
         if (recentObstacles.length > 0) {
             const parts = recentObstacles.map(function (o) {
-                return o.direction + ' ' + o.distance + 'm' + (formatAge(o.age) ? ' (' + formatAge(o.age) + ')' : '');
+                const ageStr = formatAge(o.age);
+                const agePart = ageStr ? ' (' + ageStr + ')' : '';
+                if (o.hasDistance) {
+                    return o.direction + ' ' + o.distanceM + 'm' + agePart;
+                }
+                return o.direction + ' (distance unavailable)' + agePart;
             });
             lines.push('Recent obstacles: ' + parts.join(', '));
         }
     }
 
+    // ── Recent fall ──
     if (state.latestFall && state.latestFall.timestamp) {
         const age = ageSeconds(state.latestFall.timestamp);
-        if (age !== null && age <= 10 * 60) {
+        if (age !== null && age <= FALL_FRESHNESS_MS / 1000) {
             lines.push('Recent fall: ' + formatAge(age));
         }
     }
@@ -113,16 +155,6 @@ function buildTrustedContext(state) {
     if (lines.length === 0) {
         return '[Trusted Context]\nNo sensor data available.';
     }
-
-    let sosActive = false;
-    if (state.events && typeof state.events.forEach === 'function') {
-        state.events.forEach(function (event) {
-            if (EMERGENCY_TRIGGERS.has(event.trigger) && event.status === 'ACTIVE') {
-                sosActive = true;
-            }
-        });
-    }
-    lines.push('SOS active: ' + (sosActive ? 'yes' : 'no'));
 
     return '[Trusted Context]\n' + lines.join('\n');
 }

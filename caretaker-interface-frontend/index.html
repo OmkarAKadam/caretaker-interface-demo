@@ -51,32 +51,50 @@
 
             <div class="sidebar-users" id="sidebarUsersBlock" hidden>
                 <div class="sidebar-users-head">
-                    <p class="nav-label">Monitored Users</p>
+                    <div class="sidebar-head-group">
+                        <button class="sidebar-collapse" id="toggleUsersCollapse" type="button" aria-expanded="true" aria-controls="sidebarUsersBody" title="Toggle monitored users list" aria-label="Toggle monitored users list">
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><polyline points="6 9 12 15 18 9"></polyline></svg>
+                        </button>
+                        <p class="nav-label">Monitored Users</p>
+                    </div>
                     <button class="icon-btn" id="addUserBtn" type="button" title="Add a monitored (blind) user" aria-label="Add a monitored user">
                         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><line x1="12" y1="5" x2="12" y2="19"></line><line x1="5" y1="12" x2="19" y2="12"></line></svg>
                     </button>
                 </div>
-                <ul class="sidebar-user-list" id="sidebarUserList"></ul>
-                <p class="sidebar-users-empty" id="sidebarUsersEmpty" hidden>No monitored users linked yet.</p>
+                <div class="sidebar-section-body" id="sidebarUsersBody">
+                    <ul class="sidebar-user-list" id="sidebarUserList"></ul>
+                    <p class="sidebar-users-empty" id="sidebarUsersEmpty" hidden>No monitored users linked yet.</p>
+                </div>
             </div>
 
             <div class="sidebar-devices" id="sidebarDevicesBlock" hidden>
                 <div class="sidebar-users-head">
-                    <p class="nav-label">Devices</p>
+                    <div class="sidebar-head-group">
+                        <button class="sidebar-collapse" id="toggleDevicesCollapse" type="button" aria-expanded="true" aria-controls="sidebarDevicesBody" title="Toggle devices list" aria-label="Toggle devices list">
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><polyline points="6 9 12 15 18 9"></polyline></svg>
+                        </button>
+                        <p class="nav-label">Devices</p>
+                    </div>
                     <button class="icon-btn" id="addDevicesBtn" type="button" title="Register a cap device for the selected user" aria-label="Register a cap device">
                         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><line x1="12" y1="5" x2="12" y2="19"></line><line x1="5" y1="12" x2="19" y2="12"></line></svg>
                     </button>
                 </div>
-                <ul class="sidebar-device-list" id="sidebarDeviceList"></ul>
-                <p class="sidebar-users-empty" id="sidebarDevicesEmpty" hidden>No devices registered for this user.</p>
+                <div class="sidebar-section-body" id="sidebarDevicesBody">
+                    <ul class="sidebar-device-list" id="sidebarDeviceList"></ul>
+                    <p class="sidebar-users-empty" id="sidebarDevicesEmpty" hidden>No devices registered for this user.</p>
+                </div>
             </div>
 
             <div class="sidebar-footer">
+                <button class="btn btn-outline btn-logout" id="logoutBtn" type="button" hidden title="Sign out of the console">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"></path><polyline points="16 17 21 12 16 7"></polyline><line x1="21" y1="12" x2="9" y2="12"></line></svg>
+                    Sign Out
+                </button>
                 <div class="foot-cap">
                     <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"></circle><path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3"></path><line x1="12" y1="17" x2="12.01" y2="17"></line></svg>
                     <span>Development environment</span>
                 </div>
-                <div class="device-ids-mini mono">DEVICE CAP-7F2A · FW v1.2.0</div>
+                <div class="device-ids-mini mono" id="sidebarFootDevice">No device linked</div>
             </div>
         </aside>
 
@@ -88,19 +106,16 @@
                     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><line x1="4" y1="7" x2="20" y2="7"></line><line x1="4" y1="12" x2="20" y2="12"></line><line x1="4" y1="17" x2="20" y2="17"></line></svg>
                 </button>
                 <div class="person-info">
-                    <div class="avatar" id="headerAvatar">MS</div>
+                    <div class="avatar" id="headerAvatar">?</div>
                     <div class="person-meta" id="headerPersonMeta">
-                        <h2 id="headerUserName">Mara Smith</h2>
-                        <span id="headerUserRole">Monitored person · <span class="mono">CAP-7F2A</span></span>
+                        <h2 id="headerUserName">—</h2>
+                        <span id="headerUserRole">Console access</span>
+                        <span id="headerMonitoring">No monitored user selected</span>
                     </div>
                 </div>
             </div>
 
             <div class="header-group">
-                <button class="btn btn-outline btn-logout" id="logoutBtn" type="button" hidden title="Sign out of the console">
-                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"></path><polyline points="16 17 21 12 16 7"></polyline><line x1="21" y1="12" x2="9" y2="12"></line></svg>
-                    Sign Out
-                </button>
                 <div class="header-clocker">
                     <small>Current Time</small>
                     <span id="headerClock" class="mono">—</span>
@@ -183,15 +198,15 @@
                             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"></path></svg>
                             Assistive Cap
                         </h2>
-                        <span class="demo-tag">Demo Device</span>
+                        <span class="history-count" id="deviceCardState">No device</span>
                     </div>
                     <div class="card-body">
                         <div class="device-heading">
                             <div class="device-name">
                                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"></circle><circle cx="12" cy="14" r="4"></circle><circle cx="12" cy="12" r="0.5" fill="currentColor"></circle></svg>
-                                Smart Assistive Cap
+                                <span id="deviceCardName">Assistive Cap</span>
                             </div>
-                            <span class="device-id mono">CAP-7F2A</span>
+                            <span class="device-id mono" id="deviceCardId">—</span>
                         </div>
                         <div class="device-rows">
                             <div class="device-row">
@@ -199,14 +214,14 @@
                                     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M1 1h22v14H1z" rx="2"></path><path d="M8 22h8M12 15v7"></path></svg>
                                     Device signal
                                 </span>
-                                <span class="row-value"><span class="row-dot ok"></span>Simulated · Stable</span>
+                                <span class="row-value" id="deviceCardSignal"><span class="row-dot acid"></span>—</span>
                             </div>
                             <div class="device-row">
                                 <span class="row-label">
                                     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 10c0 7-9 13-9 13s-9-6-9-13a9 9 0 0 1 18 0z"></path><circle cx="12" cy="10" r="3"></circle></svg>
                                     Location source
                                 </span>
-                                <span class="row-value"><span class="row-dot warn"></span>Phone GPS · Not connected</span>
+                                <span class="row-value" id="deviceCardLocation"><span class="row-dot acid"></span>—</span>
                             </div>
                             <div class="device-row" id="deviceHrRow">
                                 <span class="row-label">
@@ -227,12 +242,10 @@
                                     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path><path d="M14 2v6h6"></path></svg>
                                     Firmware
                                 </span>
-                                <span class="row-value mono"><span class="row-dot acid"></span>v1.2.0</span>
+                                <span class="row-value mono" id="deviceCardFirmware"><span class="row-dot acid"></span>—</span>
                             </div>
                         </div>
-                        <div class="device-note">
-                            Demonstration device. Sensor and GPS values are simulated locally — no physical hardware is connected.
-                        </div>
+                        <div class="device-note" id="deviceNote">No cap device registered for this monitored user yet — register one from the Devices section.</div>
                     </div>
                 </section>
 
@@ -503,8 +516,12 @@
                     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg>
                 </button>
             </div>
+            <div class="blind-user-mode-switch" id="blindUserModeSwitch" hidden>
+                <button class="auth-tab active" id="blindUserModeCreate" type="button">New User</button>
+                <button class="auth-tab" id="blindUserModeLink" type="button">Link Existing</button>
+            </div>
             <form id="blindUserForm" novalidate>
-                <label class="field">
+                <label class="field" id="blindUserNameField">
                     <span class="field-label">Full name</span>
                     <input type="text" id="blindUserName" class="field-input" autocomplete="off" placeholder="e.g. Alex Rivers" required>
                 </label>

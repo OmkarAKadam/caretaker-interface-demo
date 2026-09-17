@@ -11,7 +11,8 @@ const {
     getDeviceById,
     listDevicesForBlindUser,
     listAuthorizedDevicesForCaretaker,
-    rotateDeviceSecret
+    rotateDeviceSecret,
+    deleteDevice
 } = require('./queries');
 
 const router = express.Router();
@@ -168,6 +169,30 @@ router.post('/:deviceId/rotate', async (req, res, next) => {
         if (err && err.status) {
             return res.status(err.status).json({ error: err.message });
         }
+        next(err);
+    }
+});
+
+// DELETE /api/devices/:deviceId — permanently unlink a cap device.
+// The blind user's history is preserved; only the device registration is gone.
+router.delete('/:deviceId', async (req, res, next) => {
+    try {
+        const row = await getDeviceById(req.params.deviceId);
+        if (!row) {
+            return res.status(404).json({ error: 'Device not found' });
+        }
+        const allowed = await hasActiveRelationship(req.auth.user.id, row.blind_user_id);
+        if (!allowed) {
+            return res.status(404).json({ error: 'Device not found' });
+        }
+
+        const deleted = await deleteDevice(row.id);
+        if (!deleted) {
+            return res.status(404).json({ error: 'Device not found' });
+        }
+
+        return res.status(200).json({ success: true });
+    } catch (err) {
         next(err);
     }
 });

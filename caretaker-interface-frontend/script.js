@@ -10,6 +10,8 @@ let isSimulationRunning = false;
 let baseLatitude = 22.3072;
 let baseLongitude = 73.1812;
 const MAX_HISTORY_ENTRIES = 30;
+const SELECTED_USER_STORAGE_KEY = 'caretaker.selectedBlindUserId';
+const SELECTED_DEVICE_STORAGE_KEY = 'caretaker.selectedDeviceId';
 const API_BASE_URL = (typeof window !== 'undefined' && window.API_BASE_URL)
     || ((typeof location !== 'undefined' && location.hostname)
         ? `${location.protocol}//${location.hostname}:3000`
@@ -25,10 +27,13 @@ let apiStatus = 'unknown';
 let locationPollingTimer = null;
 let isLocationPollingRunning = false;
 let locationPollingEpoch = 0;
+let devicesRefreshEpoch = 0;
+let walleSessionsEpoch = 0;
 let currentLocation = {
     latitude: null,
     longitude: null,
-    timestamp: null
+    timestamp: null,
+    source: null
 };
 const processedAlertIds = new Set();
 
@@ -98,14 +103,30 @@ function updateMarkerPopup(alertId) {
     );
 }
 
+function createMapMarker(latitude, longitude) {
+    if (!map || userMarker) return;
+    const userIcon = L.divIcon({
+        className: 'st-pin',
+        html: '<span class="marker-pin"><span class="pin-core"></span><span class="pin-dot"><i></i></span></span>',
+        iconSize: [30, 30],
+        iconAnchor: [15, 15]
+    });
+    userMarker = L.marker([latitude, longitude], { icon: userIcon }).addTo(map);
+    updateMarkerPopup(null);
+}
+
 function updateMapLocation(latitude, longitude, alertId) {
-    if (!map || !userMarker) {
+    if (!isValidLocation(latitude, longitude)) return;
+    if (!map) {
         initMap(latitude, longitude);
         return;
     }
-    userMarker.setLatLng([latitude, longitude]);
-    updateMarkerPopup(alertId);
-    map.panTo([latitude, longitude], { animate: true });
+    if (!userMarker) createMapMarker(latitude, longitude);
+    if (userMarker) {
+        userMarker.setLatLng([latitude, longitude]);
+        updateMarkerPopup(alertId);
+        map.panTo([latitude, longitude], { animate: true });
+    }
 }
 
 function isValidLocation(latitude, longitude) {
@@ -124,26 +145,11 @@ function handleLocationUpdate(latitude, longitude, timestamp) {
     currentLocation = {
         latitude,
         longitude,
-        timestamp: timestamp || null
+        timestamp: timestamp || null,
+        source: 'Phone GPS'
     };
 
-    const latitudeEl = document.getElementById('latitude');
-    const longitudeEl = document.getElementById('longitude');
-    if (latitudeEl) latitudeEl.textContent = latitude.toFixed(4);
-    if (longitudeEl) longitudeEl.textContent = longitude.toFixed(4);
-
-    const locationTimestampEl = document.getElementById('locationTimestamp');
-    const phoneLastUpdateEl = document.getElementById('phoneLastUpdate');
-    if (currentLocation.timestamp) {
-        if (locationTimestampEl) locationTimestampEl.textContent = formatTime(currentLocation.timestamp);
-        if (phoneLastUpdateEl) phoneLastUpdateEl.textContent = formatTime(currentLocation.timestamp);
-    }
-
-    const srcEl = document.getElementById('locationSource');
-    if (srcEl) srcEl.textContent = 'Phone GPS';
-    const srcFooterEl = document.getElementById('locationSourceFooter');
-    if (srcFooterEl) srcFooterEl.textContent = 'Phone GPS (mobile location)';
-
+    renderLocationDisplay();
     updateMapLocation(latitude, longitude, null);
 }
 
@@ -205,6 +211,34 @@ function getSeverityKey(trigger) {
 function getSourceLabel(source) {
     const map = { 'AUTO SIM': 'Auto Simulation', 'DEMO': 'Demo', 'API': 'API', 'PHONE': 'Phone GPS' };
     return map[source] || source || '—';
+}
+
+function renderLocationDisplay() {
+    const latitudeEl = document.getElementById('latitude');
+    const longitudeEl = document.getElementById('longitude');
+    const locationTimestampEl = document.getElementById('locationTimestamp');
+    const phoneLastUpdateEl = document.getElementById('phoneLastUpdate');
+    const srcEl = document.getElementById('locationSource');
+    const srcFooterEl = document.getElementById('locationSourceFooter');
+
+    if (currentLocation.latitude !== null && currentLocation.longitude !== null) {
+        if (latitudeEl) latitudeEl.textContent = currentLocation.latitude.toFixed(4);
+        if (longitudeEl) longitudeEl.textContent = currentLocation.longitude.toFixed(4);
+        if (currentLocation.timestamp) {
+            if (locationTimestampEl) locationTimestampEl.textContent = formatTime(currentLocation.timestamp);
+            if (phoneLastUpdateEl) phoneLastUpdateEl.textContent = formatTime(currentLocation.timestamp);
+        }
+        const sourceLabel = getSourceLabel(currentLocation.source || '—');
+        if (srcEl) srcEl.textContent = sourceLabel;
+        if (srcFooterEl) srcFooterEl.textContent = sourceLabel;
+    } else {
+        if (latitudeEl) latitudeEl.textContent = '—';
+        if (longitudeEl) longitudeEl.textContent = '—';
+        if (locationTimestampEl) locationTimestampEl.textContent = '—';
+        if (phoneLastUpdateEl) phoneLastUpdateEl.textContent = '—';
+        if (srcEl) srcEl.textContent = '—';
+        if (srcFooterEl) srcFooterEl.textContent = 'No location data yet';
+    }
 }
 
 function getStatusClass(status) {
@@ -585,20 +619,16 @@ function handleEvent(event) {
     updateHeroMetrics(event);
     updateHeartRateDisplay(event);
 
-    const locationTimestampEl = document.getElementById('locationTimestamp');
-    if (locationTimestampEl) locationTimestampEl.textContent = formatTime(event.timestamp);
-
-    const latitudeEl = document.getElementById('latitude');
-    const longitudeEl = document.getElementById('longitude');
-    if (latitudeEl) latitudeEl.textContent = typeof event.latitude === 'number' ? event.latitude.toFixed(4) : '—';
-    if (longitudeEl) longitudeEl.textContent = typeof event.longitude === 'number' ? event.longitude.toFixed(4) : '—';
-
-    const srcEl = document.getElementById('locationSource');
-    if (srcEl) srcEl.textContent = getSourceLabel(event.source || 'API');
-    const srcFooterEl = document.getElementById('locationSourceFooter');
-    if (srcFooterEl) srcFooterEl.textContent = getSourceLabel(event.source || 'API');
-
-    updateMapLocation(event.latitude, event.longitude, event.alertId || null);
+    if (isValidLocation(event.latitude, event.longitude)) {
+        currentLocation = {
+            latitude: event.latitude,
+            longitude: event.longitude,
+            timestamp: event.timestamp || null,
+            source: event.source || 'API'
+        };
+        renderLocationDisplay();
+        updateMapLocation(event.latitude, event.longitude, event.alertId || null);
+    }
     updateAlertDetails(event);
     updateActionButtons(event.status);
 }
@@ -1038,9 +1068,17 @@ function setApiStatus(state) {
 }
 
 async function fetchEventsFromAPI() {
-    const endpoint = selectedBlindUserId
-        ? `${EVENTS_ENDPOINT}?blindUserId=${encodeURIComponent(selectedBlindUserId)}`
-        : EVENTS_ENDPOINT;
+    const device = selectedDevice();
+    if (selectedBlindUserId && !device) {
+        // A monitored user with no bound device: no single device to scope to,
+        // and merged user-level data would violate per-device trust.
+        return [];
+    }
+    const params = new URLSearchParams();
+    if (selectedBlindUserId) params.set('blindUserId', selectedBlindUserId);
+    if (selectedBlindUserId && device) params.set('deviceId', device.deviceIdentifier);
+    const query = params.toString();
+    const endpoint = query ? `${EVENTS_ENDPOINT}?${query}` : EVENTS_ENDPOINT;
     const response = await fetch(endpoint, { headers: { 'Accept': 'application/json' }, credentials: 'include' });
     if (!response.ok) {
         throw new Error(`HTTP ${response.status}`);
@@ -1072,6 +1110,7 @@ async function apiPollLoop(epoch) {
         setApiStatus('connected');
         await receiveEventFromAPI(events);
         await loadWalleSessions();
+        await refreshDevices();
     } catch (error) {
         if (apiStatus !== 'offline') {
             console.warn('[API] Polling failed:', error.message || error);
@@ -1142,18 +1181,37 @@ function hideWalleListState() {
 }
 
 async function loadWalleSessions() {
+    const uid = selectedBlindUserId;
+    const device = selectedDevice();
+    walleSessionsEpoch += 1;
+    const epoch = walleSessionsEpoch;
+    const stale = () => epoch !== walleSessionsEpoch || uid !== selectedBlindUserId;
+
+    // A monitored user with no bound device: show an empty conversation list
+    // (no merged user-level data that would violate per-device trust).
+    if (uid && !device) {
+        walleSessions = [];
+        walleSessionsSignature = '';
+        renderWalleSessions();
+        return;
+    }
+
     if (walleSessions.length === 0) {
         setWalleListState('Loading conversations…', 'Fetching recent Wall-E conversations.');
     }
     try {
-        const endpoint = selectedBlindUserId
-            ? `${WALLE_SESSIONS_ENDPOINT}?blindUserId=${encodeURIComponent(selectedBlindUserId)}`
-            : WALLE_SESSIONS_ENDPOINT;
+        const params = new URLSearchParams();
+        if (uid) params.set('blindUserId', uid);
+        if (uid && device) params.set('deviceId', device.deviceIdentifier);
+        const query = params.toString();
+        const endpoint = query ? `${WALLE_SESSIONS_ENDPOINT}?${query}` : WALLE_SESSIONS_ENDPOINT;
         const response = await fetch(endpoint, { headers: { 'Accept': 'application/json' }, credentials: 'include' });
         if (!response.ok) {
             throw new Error(`HTTP ${response.status}`);
         }
+        if (stale()) return;
         const data = await response.json();
+        if (stale()) return;
         const sessions = Array.isArray(data) ? data : [];
         walleSessions = sessions;
         const signature = walleSessionSignature(sessions);
@@ -1165,6 +1223,7 @@ async function loadWalleSessions() {
             highlightWalleSelection();
         }
     } catch (error) {
+        if (stale()) return;
         if (walleSessions.length === 0) {
             walleSessionsSignature = '';
             setWalleListState('Couldn\u2019t load conversations', 'Check the backend connection and try again.');
@@ -1410,9 +1469,15 @@ function createWalleMsg(turn) {
 }
 
 async function fetchLocationFromAPI() {
-    const endpoint = selectedBlindUserId
-        ? `${LOCATION_ENDPOINT}?blindUserId=${encodeURIComponent(selectedBlindUserId)}`
-        : LOCATION_ENDPOINT;
+    const device = selectedDevice();
+    if (selectedBlindUserId && !device) {
+        return { latitude: null, longitude: null, timestamp: null };
+    }
+    const params = new URLSearchParams();
+    if (selectedBlindUserId) params.set('blindUserId', selectedBlindUserId);
+    if (selectedBlindUserId && device) params.set('deviceId', device.deviceIdentifier);
+    const query = params.toString();
+    const endpoint = query ? `${LOCATION_ENDPOINT}?${query}` : LOCATION_ENDPOINT;
     const response = await fetch(endpoint, { headers: { 'Accept': 'application/json' }, credentials: 'include' });
     if (!response.ok) {
         throw new Error(`HTTP ${response.status}`);
@@ -1469,9 +1534,7 @@ async function locationPollLoop(epoch) {
     try {
         const location = await fetchLocationFromAPI();
         if (!isLocationPollingRunning || epoch !== locationPollingEpoch) return;
-        if (location.latitude === null || location.longitude === null) {
-            clearLocationDisplay();
-        } else {
+        if (location.latitude !== null && location.longitude !== null) {
             handleLocationUpdate(location.latitude, location.longitude, location.timestamp || null);
         }
         setLocationStatus('connected');
@@ -1488,19 +1551,8 @@ async function locationPollLoop(epoch) {
 // Clears the map marker and location readouts (e.g. switched to a blind user
 // with no location data yet).
 function clearLocationDisplay() {
-    currentLocation = { latitude: null, longitude: null, timestamp: null };
-    const latitudeEl = document.getElementById('latitude');
-    const longitudeEl = document.getElementById('longitude');
-    if (latitudeEl) latitudeEl.textContent = '—';
-    if (longitudeEl) longitudeEl.textContent = '—';
-    const locationTimestampEl = document.getElementById('locationTimestamp');
-    const phoneLastUpdateEl = document.getElementById('phoneLastUpdate');
-    if (locationTimestampEl) locationTimestampEl.textContent = '—';
-    if (phoneLastUpdateEl) phoneLastUpdateEl.textContent = '—';
-    const srcEl = document.getElementById('locationSource');
-    if (srcEl) srcEl.textContent = '—';
-    const srcFooterEl = document.getElementById('locationSourceFooter');
-    if (srcFooterEl) srcFooterEl.textContent = 'No location data yet';
+    currentLocation = { latitude: null, longitude: null, timestamp: null, source: null };
+    renderLocationDisplay();
     if (map && userMarker) {
         userMarker.remove();
         userMarker = null;
@@ -1743,6 +1795,7 @@ document.getElementById('simSOS').addEventListener('click', () => {
         source: 'DEMO'
     };
     receiveEvent(event);
+    pushSimulationToBackend(event);
 });
 
 document.getElementById('simHeartRate').addEventListener('click', () => {
@@ -1757,6 +1810,7 @@ document.getElementById('simHeartRate').addEventListener('click', () => {
         source: 'DEMO'
     };
     receiveEvent(event);
+    pushSimulationToBackend(event);
 });
 
 document.getElementById('simSOSHeartRate').addEventListener('click', () => {
@@ -1771,7 +1825,30 @@ document.getElementById('simSOSHeartRate').addEventListener('click', () => {
         source: 'DEMO'
     };
     receiveEvent(event);
+    pushSimulationToBackend(event);
 });
+
+// Stage 9: pushes a caretaker-demo event to the backend for the SELECTED
+// device so the reading enters the server hot path (and Wall-E context) for
+// exactly that device. Local rendering is kept regardless of the outcome; a
+// sync failure only means Wall-E won't see the reading yet.
+async function pushSimulationToBackend(event) {
+    const device = selectedDevice();
+    if (!device) return;
+    try {
+        await simulateCaretakerEvent({
+            deviceId: device.id,
+            alertId: event.alertId,
+            trigger: event.trigger,
+            heartRate: event.heartRate,
+            latitude: event.latitude,
+            longitude: event.longitude,
+            timestamp: event.timestamp
+        });
+    } catch (error) {
+        console.warn('[Simulation] Backend sync failed:', error.message || error);
+    }
+}
 
 /* ── Sign-in gate, identity, and monitored-user management ──────────────── */
 
@@ -1782,12 +1859,26 @@ let blindUserModalMode = 'create';
 let editingBlindUserId = null;
 
 let devicesForSelected = [];
+let selectedDeviceId = null;
 let pendingToken = null;
+let appliedDeviceId = null;
 
 const UI_EMAIL_PATTERN = /^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/;
 const UI_ICON_EDIT = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M17 3a2.828 2.828 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5L17 3z"></path></svg>';
 const UI_ICON_UNLINK = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><circle cx="12" cy="12" r="9"></circle><line x1="8" y1="12" x2="16" y2="12"></line></svg>';
 const UI_ICON_ROTATE = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M21 12a9 9 0 1 1-9-9"></path><path d="M21 3v6h-6"></path></svg>';
+const UI_ICON_REMOVE = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M3 6h18"></path><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path></svg>';
+
+function bindCollapseToggle(btnId, bodyId) {
+    const btn = document.getElementById(btnId);
+    const body = document.getElementById(bodyId);
+    if (!btn || !body) return;
+    btn.addEventListener('click', () => {
+        const expanded = btn.getAttribute('aria-expanded') !== 'false';
+        btn.setAttribute('aria-expanded', String(!expanded));
+        body.hidden = expanded;
+    });
+}
 
 function startDashboard() {
     renderInitialHistory();
@@ -1843,19 +1934,25 @@ function renderHeaderIdentity() {
     const nameEl = document.getElementById('headerUserName');
     const roleEl = document.getElementById('headerUserRole');
     const avatarEl = document.getElementById('headerAvatar');
+    const monitorEl = document.getElementById('headerMonitoring');
+
+    if (currentUser) {
+        if (nameEl) nameEl.textContent = currentUser.name;
+        if (avatarEl) avatarEl.textContent = getInitials(currentUser.name);
+        if (roleEl) roleEl.textContent = 'Caretaker · console access';
+    } else {
+        if (nameEl) nameEl.textContent = '—';
+        if (avatarEl) avatarEl.textContent = '?';
+        if (roleEl) roleEl.textContent = 'Console access';
+    }
 
     const selected = selectedBlindUserId
         ? authorizedBlindUsers.find(user => user.id === selectedBlindUserId)
         : null;
-
-    if (selected) {
-        if (nameEl) nameEl.textContent = selected.name;
-        if (avatarEl) avatarEl.textContent = getInitials(selected.name);
-        if (roleEl) roleEl.textContent = 'Monitored person';
-    } else if (currentUser) {
-        if (nameEl) nameEl.textContent = currentUser.name;
-        if (avatarEl) avatarEl.textContent = getInitials(currentUser.name);
-        if (roleEl) roleEl.textContent = 'Caretaker · console access';
+    if (monitorEl) {
+        monitorEl.textContent = selected
+            ? `Currently monitoring: ${selected.name}`
+            : 'No monitored user selected';
     }
 }
 
@@ -1932,17 +2029,79 @@ function selectBlindUser(id) {
     const previous = selectedBlindUserId;
     const user = authorizedBlindUsers.find(item => item.id === id);
     selectedBlindUserId = user ? id : null;
+    persistSelectedUserId();
+    // Device selection is scoped to the blind user; switching monitored users
+    // clears it and lets ensureSelectedDevice() pick again from the new list.
+    if (selectedBlindUserId !== previous) {
+        selectedDeviceId = null;
+        persistSelectedDeviceId();
+        // Force a re-bind on the next device refresh, even when the previous
+        // and next user both end up with no bound device (device IDs are unique
+        // per user, so this is defensive but correct).
+        appliedDeviceId = null;
+    }
     renderBlindUserList();
     renderHeaderIdentity();
     refreshDevices();
-    if (selectedBlindUserId !== previous && selectedBlindUserId) {
-        switchBlindUserData();
+}
+
+function readSelectedDeviceId() {
+    try {
+        const value = sessionStorage.getItem(SELECTED_DEVICE_STORAGE_KEY);
+        return value || null;
+    } catch (error) {
+        return null;
     }
 }
 
-// Clears the previous user's displayed dashboard data (events, location,
-// Wall-E) and reloads everything for the newly selected blind user.
-function switchBlindUserData() {
+function persistSelectedDeviceId() {
+    try {
+        if (selectedDeviceId) {
+            sessionStorage.setItem(SELECTED_DEVICE_STORAGE_KEY, selectedDeviceId);
+        } else {
+            sessionStorage.removeItem(SELECTED_DEVICE_STORAGE_KEY);
+        }
+    } catch (error) {
+        // Storage unavailable (e.g. privacy mode) — the selection simply won't persist.
+    }
+}
+
+function selectedDevice() {
+    if (!selectedDeviceId) return null;
+    return devicesForSelected.find(device => device.id === selectedDeviceId) || null;
+}
+
+function selectDevice(id) {
+    const device = devicesForSelected.find(item => item.id === id);
+    selectedDeviceId = device ? id : null;
+    persistSelectedDeviceId();
+    renderDeviceList();
+    syncDeviceDataScope();
+}
+
+// Guarantees a valid selectedDeviceId for the current device list. Picks the
+// persisted id when it still exists, otherwise falls back to the first device.
+function ensureSelectedDevice() {
+    if (!devicesForSelected.length) {
+        selectedDeviceId = null;
+        persistSelectedDeviceId();
+        return;
+    }
+    if (selectedDeviceId && devicesForSelected.some(device => device.id === selectedDeviceId)) {
+        return;
+    }
+    const stored = readSelectedDeviceId();
+    selectedDeviceId = stored && devicesForSelected.some(device => device.id === stored)
+        ? stored
+        : devicesForSelected[0].id;
+    persistSelectedDeviceId();
+}
+
+// Stage 9: the dashboard data (events, Wall-E, location) is bound to ONE device
+// at a time. This function clears the previous binding and reloads everything
+// for the currently selected user/device. Callers must update selectedBlindUserId
+// / selectedDeviceId and render the device/user lists before invoking it.
+function refreshBoundData() {
     clearDashboardData();
     void loadWalleSessions();
     if (isApiPollingRunning) {
@@ -1955,13 +2114,34 @@ function switchBlindUserData() {
     }
 }
 
+// The effective device the dashboard is (or should be) bound to: the persisted
+// selected device for the current blind user, or null when no user / no device.
+function effectiveSelectedDeviceId() {
+    if (!selectedBlindUserId) return null;
+    if (!devicesForSelected.length) return null;
+    return (selectedDeviceId && devicesForSelected.some((device) => device.id === selectedDeviceId))
+        ? selectedDeviceId
+        : null;
+}
+
+// Detects a change in the effective device binding and re-scopes the dashboard
+// data when it moves (user switched, device switched, device deleted, device
+// registered/removed server-side). This replaces the old switchBlindUserData
+// call-sites and ensures the dashboard always reflects selectedDeviceId.
+function syncDeviceDataScope() {
+    const effective = effectiveSelectedDeviceId();
+    if (effective !== appliedDeviceId) {
+        appliedDeviceId = effective;
+        refreshBoundData();
+    }
+}
+
 // Resets in-memory + rendered dashboard state for the previous user.
 function clearDashboardData() {
     alertsById.clear();
     processedAlertIds.clear();
     currentAlert = null;
     selectedAlertId = null;
-    currentLocation = { latitude: null, longitude: null, timestamp: null };
     walleSessions = [];
     walleSessionsSignature = '';
     selectedWalleSessionId = null;
@@ -1977,14 +2157,44 @@ function clearDashboardData() {
         userMarker = null;
     }
     clearLocationDisplay();
+    updateAlertDetails(null);
     renderWalleSessions();
     showWalleDetailEmpty();
     updateHistoryEmptyState();
 }
 
+function readSelectedUserId() {
+    try {
+        const value = sessionStorage.getItem(SELECTED_USER_STORAGE_KEY);
+        return value || null;
+    } catch (error) {
+        return null;
+    }
+}
+
+function persistSelectedUserId() {
+    try {
+        if (selectedBlindUserId) {
+            sessionStorage.setItem(SELECTED_USER_STORAGE_KEY, selectedBlindUserId);
+        } else {
+            sessionStorage.removeItem(SELECTED_USER_STORAGE_KEY);
+        }
+    } catch (error) {
+        // Storage unavailable (e.g. privacy mode) — the selection simply won't persist.
+    }
+}
+
 function normalizeSelection() {
     if (!selectedBlindUserId || !authorizedBlindUsers.some(user => user.id === selectedBlindUserId)) {
-        selectedBlindUserId = authorizedBlindUsers.length ? authorizedBlindUsers[0].id : null;
+        if (authorizedBlindUsers.length) {
+            const stored = readSelectedUserId();
+            const candidate = stored && authorizedBlindUsers.find(user => user.id === stored);
+            selectedBlindUserId = candidate ? candidate.id : authorizedBlindUsers[0].id;
+            persistSelectedUserId();
+        } else {
+            selectedBlindUserId = null;
+            persistSelectedUserId();
+        }
         renderBlindUserList();
         renderHeaderIdentity();
     }
@@ -2005,12 +2215,9 @@ async function refreshBlindUsers() {
     renderHeaderIdentity();
     refreshDevices();
     if (selectedBlindUserId) {
-        if (selectedBlindUserId !== previous || authorizedBlindUsers.length > 0) {
-            switchBlindUserData();
-        }
-    } else {
-        clearDashboardData();
+        return true;
     }
+    clearDashboardData();
     return true;
 }
 
@@ -2027,18 +2234,37 @@ function openBlindUserModal(mode, user) {
     const errorEl = document.getElementById('blindUserFormError');
     if (errorEl) errorEl.textContent = '';
 
+    const modeSwitch = document.getElementById('blindUserModeSwitch');
+    if (modeSwitch) modeSwitch.hidden = mode === 'edit';
+
+    const nameField = document.getElementById('blindUserNameField');
     const nameEl = document.getElementById('blindUserName');
     const emailEl = document.getElementById('blindUserEmail');
+    if (nameField) nameField.hidden = mode === 'link';
     if (nameEl) nameEl.value = (mode === 'edit' && user) ? user.name : '';
     if (emailEl) emailEl.value = (mode === 'edit' && user) ? user.email : '';
 
+    const createTab = document.getElementById('blindUserModeCreate');
+    const linkTab = document.getElementById('blindUserModeLink');
+    if (createTab) createTab.classList.toggle('active', mode !== 'link');
+    if (linkTab) linkTab.classList.toggle('active', mode === 'link');
+
+    const submitBtn = document.getElementById('blindUserFormSubmit');
+    if (submitBtn) submitBtn.textContent = mode === 'link' ? 'Link User' : mode === 'edit' ? 'Save' : 'Save';
+
     modal.hidden = false;
-    if (nameEl) nameEl.focus();
+    if (mode === 'link' ? emailEl : nameEl) {
+        (mode === 'link' ? emailEl : nameEl).focus();
+    }
 }
 
 function closeBlindUserModal() {
     const modal = document.getElementById('blindUserModal');
     if (modal) modal.hidden = true;
+    const nameField = document.getElementById('blindUserNameField');
+    if (nameField) nameField.hidden = false;
+    const submitBtn = document.getElementById('blindUserFormSubmit');
+    if (submitBtn) submitBtn.textContent = 'Save';
     blindUserModalMode = 'create';
     editingBlindUserId = null;
 }
@@ -2058,19 +2284,50 @@ async function handleBlindUserFormSubmit(event) {
     const submitBtn = document.getElementById('blindUserFormSubmit');
     if (!nameEl || !emailEl || !errorEl || !submitBtn) return;
 
-    const name = nameEl.value.trim();
     const email = emailEl.value.trim();
+    setModalError(errorEl, null);
 
+    const mode = blindUserModalMode;
+    const targetId = editingBlindUserId;
+
+    // Link mode: only email is required; name is ignored.
+    if (mode === 'link') {
+        if (!UI_EMAIL_PATTERN.test(email)) return setModalError(errorEl, 'Enter a valid email address.');
+
+        submitBtn.disabled = true;
+        const originalLabel = submitBtn.textContent;
+        submitBtn.textContent = 'Linking…';
+
+        try {
+            const lookupResult = await lookupBlindUserByEmail(email);
+            const existingUser = lookupResult && lookupResult.user;
+            if (!existingUser) throw new Error('No monitored user found with that email address.');
+            await linkBlindUserToCaretaker(existingUser.id);
+            closeBlindUserModal();
+            await refreshBlindUsers();
+            selectBlindUser(existingUser.id);
+        } catch (error) {
+            if (handleAuthError(error)) return;
+            let message = error.message || 'Could not link this user.';
+            if (error && error.status === 409) message = 'That user is already being monitored.';
+            setModalError(errorEl, message);
+        } finally {
+            submitBtn.disabled = false;
+            submitBtn.textContent = originalLabel;
+        }
+        return;
+    }
+
+    // Create / edit mode: full name + email.
+    const name = nameEl.value.trim();
     setModalError(errorEl, null);
     if (!name) return setModalError(errorEl, 'Enter a full name.');
     if (!UI_EMAIL_PATTERN.test(email)) return setModalError(errorEl, 'Enter a valid email address.');
 
     submitBtn.disabled = true;
     const originalLabel = submitBtn.textContent;
-    submitBtn.textContent = blindUserModalMode === 'edit' ? 'Saving…' : 'Adding…';
+    submitBtn.textContent = mode === 'edit' ? 'Saving…' : 'Adding…';
 
-    const mode = blindUserModalMode;
-    const targetId = editingBlindUserId;
     let focusId = null;
 
     try {
@@ -2129,11 +2386,70 @@ function deviceStatusClass(status) {
     return 'offline';
 }
 
+function rowDotClass(status) {
+    if (status === 'ONLINE') return 'ok';
+    if (status === 'ERROR') return 'warn';
+    return 'acid';
+}
+
+function renderDeviceCard() {
+    const nameEl = document.getElementById('deviceCardName');
+    const idEl = document.getElementById('deviceCardId');
+    const stateEl = document.getElementById('deviceCardState');
+    const signalEl = document.getElementById('deviceCardSignal');
+    const locationEl = document.getElementById('deviceCardLocation');
+    const firmwareEl = document.getElementById('deviceCardFirmware');
+    const noteEl = document.getElementById('deviceNote');
+    const footEl = document.getElementById('sidebarFootDevice');
+    const monitorEl = document.getElementById('headerMonitoring');
+
+    const selected = selectedBlindUserId
+        ? authorizedBlindUsers.find(user => user.id === selectedBlindUserId)
+        : null;
+
+    const device = selectedDevice();
+
+    if (!device) {
+        if (stateEl) stateEl.textContent = 'No device';
+        if (nameEl) nameEl.textContent = 'Assistive Cap';
+        if (idEl) idEl.textContent = '—';
+        if (signalEl) signalEl.innerHTML = '<span class="row-dot acid"></span>—';
+        if (locationEl) locationEl.innerHTML = '<span class="row-dot acid"></span>—';
+        if (firmwareEl) firmwareEl.innerHTML = '<span class="row-dot acid"></span>—';
+        if (noteEl) noteEl.textContent = 'No cap device registered for this monitored user yet — register one from the Devices section.';
+        if (footEl) footEl.textContent = 'No device linked';
+        if (monitorEl) {
+            monitorEl.textContent = selected
+                ? `Currently monitoring: ${selected.name}`
+                : 'No monitored user selected';
+        }
+        return;
+    }
+
+    const status = device.status || 'OFFLINE';
+    const dotClass = rowDotClass(status);
+
+    if (stateEl) stateEl.textContent = status;
+    if (nameEl) nameEl.textContent = device.friendlyName || 'Assistive Cap';
+    if (idEl) idEl.textContent = device.deviceIdentifier;
+    if (signalEl) signalEl.innerHTML = `<span class="row-dot ${dotClass}"></span>${status} · Last seen ${lastSeenLabel(device.lastSeenAt)}`;
+    if (locationEl) locationEl.innerHTML = `<span class="row-dot ${dotClass}"></span>Blind person's phone GPS`;
+    if (firmwareEl) firmwareEl.innerHTML = '<span class="row-dot acid"></span>—';
+    if (noteEl) noteEl.textContent = `Registered cap ${device.deviceIdentifier} for this monitored user. Pair the blind person's phone with the device token to start sending readings.`;
+    if (footEl) footEl.textContent = `DEVICE ${device.deviceIdentifier} · ${status}`;
+    if (monitorEl) {
+        monitorEl.textContent = selected
+            ? `Currently monitoring: ${selected.name} · ${device.deviceIdentifier}`
+            : 'No monitored user selected';
+    }
+}
+
 function renderDeviceList() {
     const blockEl = document.getElementById('sidebarDevicesBlock');
     const listEl = document.getElementById('sidebarDeviceList');
     const emptyEl = document.getElementById('sidebarDevicesEmpty');
     if (!blockEl || !listEl) return;
+    renderDeviceCard();
 
     const selected = selectedBlindUserId
         ? authorizedBlindUsers.find(user => user.id === selectedBlindUserId)
@@ -2142,6 +2458,7 @@ function renderDeviceList() {
     if (!selected) {
         blockEl.hidden = true;
         devicesForSelected = [];
+        renderDeviceCard();
         return;
     }
 
@@ -2151,11 +2468,14 @@ function renderDeviceList() {
 
     devicesForSelected.forEach((device) => {
         const item = document.createElement('li');
-        item.className = 'sidebar-device';
+        item.className = 'sidebar-device' + (device.id === selectedDeviceId ? ' active' : '');
         item.dataset.deviceId = device.id;
 
-        const main = document.createElement('div');
+        const main = document.createElement('button');
+        main.type = 'button';
         main.className = 'sidebar-device-main';
+        main.setAttribute('aria-label', `Select device ${device.deviceIdentifier}`);
+        main.addEventListener('click', () => selectDevice(device.id));
 
         const meta = document.createElement('span');
         meta.className = 'sidebar-device-meta';
@@ -2182,6 +2502,7 @@ function renderDeviceList() {
         meta.appendChild(friendly);
         meta.appendChild(badge);
         meta.appendChild(seen);
+        main.appendChild(meta);
 
         const actions = document.createElement('span');
         actions.className = 'sidebar-device-actions';
@@ -2197,8 +2518,19 @@ function renderDeviceList() {
             rotateDeviceTokenForSelected(device);
         });
 
+        const removeBtn = document.createElement('button');
+        removeBtn.type = 'button';
+        removeBtn.className = 'icon-btn';
+        removeBtn.title = 'Unlink device';
+        removeBtn.setAttribute('aria-label', `Unlink device ${device.deviceIdentifier}`);
+        removeBtn.innerHTML = UI_ICON_REMOVE;
+        removeBtn.addEventListener('click', (event) => {
+            event.stopPropagation();
+            confirmRemoveDevice(device);
+        });
+
         actions.appendChild(rotateBtn);
-        main.appendChild(meta);
+        actions.appendChild(removeBtn);
         item.appendChild(main);
         item.appendChild(actions);
         listEl.appendChild(item);
@@ -2206,16 +2538,23 @@ function renderDeviceList() {
 }
 
 async function refreshDevices() {
-    if (!selectedBlindUserId) {
+    const uid = selectedBlindUserId;
+    devicesRefreshEpoch += 1;
+    const epoch = devicesRefreshEpoch;
+    const stale = () => epoch !== devicesRefreshEpoch || uid !== selectedBlindUserId;
+
+    if (!uid) {
         devicesForSelected = [];
         renderDeviceList();
         return;
     }
     try {
-        const data = await fetchDevicesForBlindUser(selectedBlindUserId);
+        const data = await fetchDevicesForBlindUser(uid);
+        if (stale()) return;
         devicesForSelected = (data && Array.isArray(data.devices)) ? data.devices : [];
     } catch (error) {
         if (handleAuthError(error)) return;
+        if (stale()) return;
         if (error && error.status === 404) {
             devicesForSelected = [];
         } else {
@@ -2223,7 +2562,12 @@ async function refreshDevices() {
             devicesForSelected = [];
         }
     }
+    if (stale()) return;
+    ensureSelectedDevice();
     renderDeviceList();
+    // Re-scope the dashboard data when the effective device binding changed
+    // (user switched, device deleted, or the persisted selection vanished).
+    syncDeviceDataScope();
 }
 
 const UI_DEVICE_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:/-]{0,63}$/;
@@ -2351,6 +2695,26 @@ async function rotateDeviceTokenForSelected(device) {
     }
 }
 
+async function confirmRemoveDevice(device) {
+    const name = device.friendlyName || device.deviceIdentifier || 'this device';
+    if (!window.confirm(`Unlink ${name} (${device.deviceIdentifier})? Historical readings are preserved, but the device will stop appearing on the dashboard until re-registered.`)) {
+        return;
+    }
+    try {
+        await deleteDevice(device.id);
+        // If the deleted device was selected, let ensureSelectedDevice() pick
+        // the next one; otherwise retain the remaining selection.
+        if (device.id === selectedDeviceId) {
+            selectedDeviceId = null;
+            persistSelectedDeviceId();
+        }
+        await refreshDevices();
+    } catch (error) {
+        if (handleAuthError(error)) return;
+        window.alert(error.message || 'Could not unlink the device.');
+    }
+}
+
 async function bootDashboard() {
     showAuthOverlay('Checking your session…');
 
@@ -2363,7 +2727,17 @@ async function bootDashboard() {
         return;
     }
 
-    if (!session || !session.authenticated || !session.user || session.user.role !== 'CARETAKER') {
+    if (!session || !session.authenticated || !session.user) {
+        window.location.replace('auth.html');
+        return;
+    }
+
+    if (session.user.role === 'BLIND_USER') {
+        window.location.replace('blind-client/index.html');
+        return;
+    }
+
+    if (session.user.role !== 'CARETAKER') {
         window.location.replace('auth.html');
         return;
     }
@@ -2390,10 +2764,8 @@ async function bootDashboard() {
     normalizeSelection();
     refreshDevices();
     startDashboard();
-    // With a blind user active, bind the dashboard data to that user.
-    if (selectedBlindUserId) {
-        switchBlindUserData();
-    }
+    // refreshDevices() re-scopes the dashboard to the selected user/device via
+    // syncDeviceDataScope(); nothing more is needed here.
 }
 
 const logoutBtnEl = document.getElementById('logoutBtn');
@@ -2413,6 +2785,11 @@ if (logoutBtnEl) {
 const addUserBtnEl = document.getElementById('addUserBtn');
 if (addUserBtnEl) addUserBtnEl.addEventListener('click', () => openBlindUserModal('create', null));
 
+const blindUserModeCreateEl = document.getElementById('blindUserModeCreate');
+const blindUserModeLinkEl = document.getElementById('blindUserModeLink');
+if (blindUserModeCreateEl) blindUserModeCreateEl.addEventListener('click', () => openBlindUserModal('create', null));
+if (blindUserModeLinkEl) blindUserModeLinkEl.addEventListener('click', () => openBlindUserModal('link', null));
+
 const blindUserModalCloseEl = document.getElementById('blindUserModalClose');
 if (blindUserModalCloseEl) blindUserModalCloseEl.addEventListener('click', closeBlindUserModal);
 const blindUserFormCancelEl = document.getElementById('blindUserFormCancel');
@@ -2423,6 +2800,9 @@ if (blindUserFormEl) blindUserFormEl.addEventListener('submit', handleBlindUserF
 
 const addDevicesBtnEl = document.getElementById('addDevicesBtn');
 if (addDevicesBtnEl) addDevicesBtnEl.addEventListener('click', openDeviceModal);
+
+bindCollapseToggle('toggleUsersCollapse', 'sidebarUsersBody');
+bindCollapseToggle('toggleDevicesCollapse', 'sidebarDevicesBody');
 
 const deviceModalCloseEl = document.getElementById('deviceModalClose');
 if (deviceModalCloseEl) deviceModalCloseEl.addEventListener('click', closeDeviceModal);

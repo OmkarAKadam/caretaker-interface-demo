@@ -115,6 +115,19 @@ async function rotateDeviceSecret(deviceId, newSecretHash) {
     return result.rows[0] || null;
 }
 
+// Permanently deletes a registered device row. Returns the deleted row's id or
+// null. Historical telemetry rows are untouched (they keep their own FK/ids).
+async function deleteDevice(deviceId) {
+    if (!isValidUuid(deviceId)) return null;
+    const result = await query(
+        `DELETE FROM devices
+         WHERE id = $1
+         RETURNING id`,
+        [deviceId]
+    );
+    return result.rows[0] || null;
+}
+
 module.exports = {
     DEVICE_STATUS_ONLINE,
     DEVICE_STATUS_OFFLINE,
@@ -126,5 +139,6 @@ module.exports = {
     listDevicesForBlindUser,
     listAuthorizedDevicesForCaretaker,
     touchDeviceSeen,
-    rotateDeviceSecret
+    rotateDeviceSecret,
+    deleteDevice
 };

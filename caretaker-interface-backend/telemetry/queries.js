@@ -210,6 +210,21 @@ async function listRecentEventsForBlindUser(blindUserId, limit) {
     return result.rows.slice().reverse().map(rowToEvent);
 }
 
+// Stage 9: device-scoped variant — only events belonging to ONE registered
+// device of the blind user. The caretaker's active relationship to the blind
+// user is enforced by the router before this query is reached.
+async function listRecentEventsForDevice(blindUserId, deviceIdentifier, limit) {
+    const result = await query(
+        `SELECT ${EVENT_SELECT_COLUMNS}
+         FROM events
+         WHERE blind_user_identifier = $1 AND device_identifier = $2
+         ORDER BY occurred_at DESC, created_at DESC
+         LIMIT $3`,
+        [blindUserId, deviceIdentifier, limit]
+    );
+    return result.rows.slice().reverse().map(rowToEvent);
+}
+
 async function findEventByAlertId(alertId) {
     const result = await query(
         `SELECT ${EVENT_SELECT_COLUMNS} FROM events WHERE alert_id = $1`,
@@ -271,7 +286,7 @@ async function upsertLatestState(snapshot) {
             toJson(snap.deviceStatus),
             toJson(snap.heartRate),
             toJson(snap.fall),
-            typeof snap.buzzer === 'string' ? snap.buzzer : null
+            typeof snap.buzzer === 'string' ? snap.buzzer : (snap.buzzer ? JSON.stringify(snap.buzzer) : null)
         ]
     );
 }
@@ -284,12 +299,20 @@ async function loadLatestState() {
         return null;
     }
     const row = result.rows[0];
+    let buzzer = row.buzzer || null;
+    if (typeof buzzer === 'string' && buzzer !== 'ON' && buzzer !== 'OFF') {
+        try {
+            buzzer = JSON.parse(buzzer);
+        } catch (_err) {
+            buzzer = null;
+        }
+    }
     return {
         location: row.location || null,
         deviceStatus: row.device_status || null,
         heartRate: row.heart_rate || null,
         fall: row.fall || null,
-        buzzer: row.buzzer || null
+        buzzer
     };
 }
 
@@ -392,5 +415,6 @@ module.exports = {
     insertWallMessage,
     listWallTurns,
     listWallSessions,
-    listRecentEventsForBlindUser
+    listRecentEventsForBlindUser,
+    listRecentEventsForDevice
 };

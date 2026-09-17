@@ -71,6 +71,7 @@ body {
     width: 100%;
     max-width: 480px;
     min-height: 100vh;
+    min-height: 100dvh;
     background: transparent;
     display: flex;
     flex-direction: column;
@@ -788,7 +789,7 @@ body {
 .demo-toggle-label.on .dot { background: var(--warn); }
 
 .demo-body { max-height: 0; overflow: hidden; transition: max-height var(--t-base); background: #f7f3ec; }
-.demo-card.open .demo-body { max-height: 1400px; }
+.demo-card.open .demo-body { max-height: 2600px; }
 
 .demo-body-inner {
     padding: 1.1rem;
@@ -914,6 +915,8 @@ body {
     padding-top: 0.1rem;
 }
 
+.obstacle-panel.two { grid-template-columns: 1fr 1fr; }
+
 .obstacle-btn {
     display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 0.35rem;
     padding: 0.6rem 0.4rem;
@@ -934,6 +937,25 @@ body {
 .obstacle-btn.right:hover { border-color: var(--emergency); color: var(--emergency-strong); background: var(--emergency-soft); }
 .obstacle-btn.center:hover { border-color: var(--warn); color: #8a6a2f; background: var(--warn-soft); }
 
+.heartrate-btn {
+    display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 0.35rem;
+    padding: 0.6rem 0.4rem;
+    border-radius: var(--r-sm);
+    border: 1px solid var(--line-strong);
+    background: var(--bg-surface);
+    color: var(--text-2);
+    font-size: 0.8125rem; font-weight: 700;
+    font-family: inherit;
+    cursor: pointer;
+    transition: var(--t-fast);
+    min-height: 60px;
+}
+.heartrate-btn svg { width: 16px; height: 16px; }
+.heartrate-btn:hover { border-color: var(--brand); color: var(--brand-ink); background: var(--brand-soft); transform: translateY(-1px); }
+.heartrate-btn:focus-visible { outline: 2px solid var(--brand); outline-offset: 2px; }
+.heartrate-btn.left:hover { border-color: var(--ok); color: #15563e; background: var(--ok-soft); }
+.heartrate-btn.center:hover { border-color: var(--warn); color: #8a6a2f; background: var(--warn-soft); }
+
 .demo-feedback {
     min-height: 0;
     font-size: 0.6875rem;
@@ -947,6 +969,24 @@ body {
 .demo-feedback.bad { color: var(--emergency-strong); }
 
 /* ── Responsive: tablet landscape ──────────────────────────── */
+
+@media (max-width: 380px) {
+    .phone-main { padding: var(--gap-md) 0.9rem 2rem; }
+    .phone-header { padding: 0.75rem 0.9rem; }
+    .status-pill { gap: 0.4rem; padding: 0.3rem 0.6rem; }
+}
+
+/* ── Responsive: phones ───────────────────────────────────────
+   Hardening for the reported mobile issues: no horizontal scroll, no demo
+   content clipped by the collapsible cap, and coordinate/header rows that can
+   wrap instead of pushing the page wider than the viewport. */
+@media (max-width: 480px) {
+    html, body { overflow-x: hidden; }
+    .demo-head { flex-wrap: wrap; row-gap: 0.4rem; }
+    .demo-card.open .demo-body { max-height: none; overflow: visible; }
+    .coord-row { flex-wrap: wrap; }
+    .sim-coords, .coord-value { overflow-wrap: anywhere; }
+}
 
 @media (min-width: 481px) {
     .actions-row { grid-template-columns: 1fr 1fr; }
@@ -1008,7 +1048,7 @@ body {
 }
 
 @media (min-width: 900px) and (max-height: 860px) {
-    .demo-card.open .demo-body { max-height: 1200px; }
+    .demo-card.open .demo-body { max-height: 2600px; }
 }
 
 /* ── Pair Device card ──────────────────────────────────────── */

@@ -242,6 +242,7 @@ function getSessionSummaries(filter) {
     const summaries = [];
     for (const session of sessions.values()) {
         if (filter && filter.blindUserId && session.blindUserId !== filter.blindUserId) continue;
+        if (filter && filter.deviceId && session.deviceId !== filter.deviceId) continue;
         summaries.push({
             sessionId: session.sessionId,
             startedAt: session.startedAt,

@@ -165,6 +165,7 @@ const simLngEl = document.getElementById('simLng');
 const demoFeedback = document.getElementById('demoFeedback');
 const demoCapTrigger = document.getElementById('demoCapTrigger');
 const obstacleButtons = document.querySelectorAll('.obstacle-btn');
+const heartRateButtons = document.querySelectorAll('.heartrate-btn');
 
 const micSosBtn = document.getElementById('micSosBtn');
 const micSosLabel = document.getElementById('micSosLabel');
@@ -2037,6 +2038,55 @@ async function sendDemoEvent(direction) {
     }
 }
 
+async function sendHeartRateDemo(bpm) {
+    const value = parseInt(bpm, 10);
+    if (!Number.isFinite(value) || value <= 0 || value > 400) {
+        demoFeedback.textContent = `Invalid heart-rate value: “${bpm}”.`;
+        demoFeedback.classList.add('bad');
+        return;
+    }
+
+    // Always a HEART_RATE trigger: a heart-rate simulation tests heart-rate
+    // data flow, not the emergency path. Converting a high reading into
+    // SOS_AND_HEART_RATE would silently inject an SOS into Wall-E context and
+    // the caretaker dashboard; the dedicated SOS trigger remains available.
+    const trigger = 'HEART_RATE';
+    const alertId = `HR-DEMO-${Date.now()}-${Math.floor(Math.random() * 1000)}`;
+    const payload = {
+        alertId,
+        trigger,
+        status: 'NORMAL',
+        heartRate: value,
+        latitude: PHONE_COORDS.latitude,
+        longitude: PHONE_COORDS.longitude,
+        timestamp: new Date().toISOString()
+    };
+
+    demoFeedback.textContent = 'Sending heart-rate reading…';
+    demoFeedback.classList.remove('ok', 'bad');
+
+    try {
+        const response = await fetch(EVENTS_ENDPOINT, {
+            method: 'POST',
+            headers: Object.assign(
+                { 'Content-Type': 'application/json', 'Accept': 'application/json' },
+                deviceAuthHeaders()
+            ),
+            body: JSON.stringify(payload)
+        });
+        if (!response.ok) {
+            if (response.status === 401) handleDeviceUnauthorized();
+            throw new Error(`HTTP ${response.status}`);
+        }
+        const created = await response.json();
+        demoFeedback.textContent = `Heart-rate ${value} BPM sent (${created.trigger}). Wall-E can now see this reading.`;
+        demoFeedback.classList.add('ok');
+    } catch (error) {
+        demoFeedback.textContent = `Failed to send heart rate: ${error.message || error}`;
+        demoFeedback.classList.add('bad');
+    }
+}
+
 async function checkBackend() {
     try {
         const response = await fetch(HEALTH_ENDPOINT, { headers: { 'Accept': 'application/json' } });
@@ -2062,6 +2112,9 @@ moveButtons.east.addEventListener('click', () => applyMovement(0, MOVE_STEP));
 moveButtons.west.addEventListener('click', () => applyMovement(0, -MOVE_STEP));
 obstacleButtons.forEach((btn) => {
     btn.addEventListener('click', () => sendDemoEvent(btn.getAttribute('data-direction')));
+});
+heartRateButtons.forEach((btn) => {
+    btn.addEventListener('click', () => sendHeartRateDemo(btn.getAttribute('data-heartrate')));
 });
 
 micSosBtn.addEventListener('click', toggleMicSos);

@@ -76,36 +76,6 @@
                 </div>
             </section>
 
-            <section class="card pair-card" id="pairCard">
-                <div class="pair-head">
-                    <div class="pair-copy">
-                        <h2>Pair Device</h2>
-                        <p id="pairStatus">Link this phone with the cap device (BG001).</p>
-                    </div>
-                    <span class="sim-badge" id="pairChip"><span class="dot"></span><span id="pairChipText">Unpaired</span></span>
-                </div>
-                <div class="pair-body" id="pairForm">
-                    <label class="pair-field">
-                        <span class="pair-label">Device ID</span>
-                        <input type="text" id="pairDeviceId" class="pair-input mono" autocomplete="off" placeholder="BG001" spellcheck="false">
-                    </label>
-                    <label class="pair-field">
-                        <span class="pair-label">Device Token</span>
-                        <input type="password" id="pairDeviceToken" class="pair-input mono" autocomplete="off" placeholder="Paste the one-time token from the caretaker console" spellcheck="false">
-                    </label>
-                    <p class="pair-error" id="pairError" role="alert"></p>
-                    <button class="pair-btn" id="pairSubmitBtn" type="button">Pair Device</button>
-                </div>
-                <div class="pair-body" id="pairInfo" hidden>
-                    <div class="pair-info-row">
-                        <span class="pair-label">Linked device</span>
-                        <span class="pair-value mono" id="pairDeviceName">—</span>
-                    </div>
-                    <p class="pair-note">This phone identifies itself as this device to the backend. The pairing is stored only on this phone. To change it, unpair and pair again with a new token.</p>
-                    <button class="unpair-btn" id="unpairBtn" type="button">Unpair Device</button>
-                </div>
-            </section>
-
             <section class="emergency-section" id="emergencySection">
                 <div class="emergency-card">
                     <div class="emergency-header">
@@ -213,7 +183,35 @@
                 when the cap trigger is activated. Obstacle alerts from the cap are spoken
                 aloud once voice alerts are enabled.
             </p>
-
+            <section class="card pair-card" id="pairCard">
+                <div class="pair-head">
+                    <div class="pair-copy">
+                        <h2>Pair Device</h2>
+                        <p id="pairStatus">Link this phone with the cap device (BG001).</p>
+                    </div>
+                    <span class="sim-badge" id="pairChip"><span class="dot"></span><span id="pairChipText">Unpaired</span></span>
+                </div>
+                <div class="pair-body" id="pairForm">
+                    <label class="pair-field">
+                        <span class="pair-label">Device ID</span>
+                        <input type="text" id="pairDeviceId" class="pair-input mono" autocomplete="off" placeholder="BG001" spellcheck="false">
+                    </label>
+                    <label class="pair-field">
+                        <span class="pair-label">Device Token</span>
+                        <input type="password" id="pairDeviceToken" class="pair-input mono" autocomplete="off" placeholder="Paste the one-time token from the caretaker console" spellcheck="false">
+                    </label>
+                    <p class="pair-error" id="pairError" role="alert"></p>
+                    <button class="pair-btn" id="pairSubmitBtn" type="button">Pair Device</button>
+                </div>
+                <div class="pair-body" id="pairInfo" hidden>
+                    <div class="pair-info-row">
+                        <span class="pair-label">Linked device</span>
+                        <span class="pair-value mono" id="pairDeviceName">—</span>
+                    </div>
+                    <p class="pair-note">This phone identifies itself as this device to the backend. The pairing is stored only on this phone. To change it, unpair and pair again with a new token.</p>
+                    <button class="unpair-btn" id="unpairBtn" type="button">Unpair Device</button>
+                </div>
+            </section>
             <section class="card demo-card" id="demoCard">
                 <button class="demo-head" id="demoToggle" type="button" aria-expanded="false">
                     <span class="demo-title">
@@ -287,6 +285,30 @@
                                 </button>
                             </div>
                             <p class="demo-note">Transmits the current simulated or real position to the backend.</p>
+                        </div>
+                        <div class="demo-block">
+                            <h4>
+                                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3z"></path><path d="M19 10v2a7 7 0 0 1-14 0v-2"></path><line x1="12" y1="19" x2="12" y2="22"></line></svg>
+                                Heart-Rate Reading
+                            </h4>
+                            <p class="demo-intro">
+                                Sends a heart-rate reading to the backend. Wall-E uses
+                                the newest reading from this device when you ask about vitals.
+                            </p>
+                            <div class="obstacle-panel two">
+                                <button class="heartrate-btn left" type="button" data-heartrate="72" title="Normal resting reading">
+                                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4"><path d="M3 12h4l2-5 4 10 2-5h6"></path></svg>
+                                    72 BPM
+                                </button>
+                                <button class="heartrate-btn center" type="button" data-heartrate="142" title="Elevated reading">
+                                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3z"></path><path d="M19 10v2a7 7 0 0 1-14 0v-2"></path><line x1="12" y1="19" x2="12" y2="22"></line></svg>
+                                    142 BPM
+                                </button>
+                            </div>
+                            <p class="demo-note">
+                                Posts a HEART_RATE event through REST so the caretaker
+                                dashboard and Wall-E context see a live reading.
+                            </p>
                         </div>
                         <div class="demo-block">
                             <h4>
