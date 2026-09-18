@@ -619,7 +619,8 @@ function handleEvent(event) {
     updateHeroMetrics(event);
     updateHeartRateDisplay(event);
 
-    if (isValidLocation(event.latitude, event.longitude)) {
+    const isSimulationOrDemo = event.source === 'AUTO SIM' || event.source === 'DEMO';
+    if (!isSimulationOrDemo && isValidLocation(event.latitude, event.longitude)) {
         currentLocation = {
             latitude: event.latitude,
             longitude: event.longitude,
@@ -1795,7 +1796,6 @@ document.getElementById('simSOS').addEventListener('click', () => {
         source: 'DEMO'
     };
     receiveEvent(event);
-    pushSimulationToBackend(event);
 });
 
 document.getElementById('simHeartRate').addEventListener('click', () => {
@@ -1810,7 +1810,6 @@ document.getElementById('simHeartRate').addEventListener('click', () => {
         source: 'DEMO'
     };
     receiveEvent(event);
-    pushSimulationToBackend(event);
 });
 
 document.getElementById('simSOSHeartRate').addEventListener('click', () => {
@@ -1825,30 +1824,7 @@ document.getElementById('simSOSHeartRate').addEventListener('click', () => {
         source: 'DEMO'
     };
     receiveEvent(event);
-    pushSimulationToBackend(event);
 });
-
-// Stage 9: pushes a caretaker-demo event to the backend for the SELECTED
-// device so the reading enters the server hot path (and Wall-E context) for
-// exactly that device. Local rendering is kept regardless of the outcome; a
-// sync failure only means Wall-E won't see the reading yet.
-async function pushSimulationToBackend(event) {
-    const device = selectedDevice();
-    if (!device) return;
-    try {
-        await simulateCaretakerEvent({
-            deviceId: device.id,
-            alertId: event.alertId,
-            trigger: event.trigger,
-            heartRate: event.heartRate,
-            latitude: event.latitude,
-            longitude: event.longitude,
-            timestamp: event.timestamp
-        });
-    } catch (error) {
-        console.warn('[Simulation] Backend sync failed:', error.message || error);
-    }
-}
 
 /* ── Sign-in gate, identity, and monitored-user management ──────────────── */
 
