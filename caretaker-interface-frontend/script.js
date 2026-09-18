@@ -1768,7 +1768,61 @@ if (navToggle && sidebarEl) {
     });
 }
 
+// Sends a caretaker simulation to the backend for the currently selected/
+// applied device and reflects ONLY the backend-confirmed event back into the
+// local dashboard. Uses POST /api/caretaker/simulate-event (supports SOS,
+// HEART_RATE, SOS_AND_HEART_RATE), which also folds the heart rate into the
+// backend trusted state that Wall-E reads — keeping dashboard and Wall-E in
+// sync. The backend response carries source:'DEMO', so handleEvent() will NOT
+// move the real device location marker (simulations never overwrite GPS).
+async function sendSimulationToBackend(trigger, heartRate) {
+    const device = selectedDevice();
+    if (!device) {
+        showSimFeedback('Select a device before simulating an event.', true);
+        return false;
+    }
+
+    const hasRealLocation =
+        currentLocation &&
+        Number.isFinite(currentLocation.latitude) &&
+        Number.isFinite(currentLocation.longitude);
+    const payload = {
+        deviceId: device.id,
+        trigger,
+        latitude: hasRealLocation ? currentLocation.latitude : 22.3072,
+        longitude: hasRealLocation ? currentLocation.longitude : 73.1812
+    };
+    if (heartRate !== undefined && heartRate !== null) {
+        payload.heartRate = heartRate;
+    }
+
+    try {
+        const created = await simulateCaretakerEvent(payload);
+        // The later API poll returns the same SIM alertId; processedAlertIds
+        // dedupes it, so there is exactly one dashboard update per simulation.
+        receiveEvent(created);
+        showSimFeedback(`${created.trigger} simulated for ${device.deviceIdentifier}.`);
+        return true;
+    } catch (error) {
+        if (handleAuthError(error)) return false;
+        const message = (error && error.message) || 'Simulation failed.';
+        showSimFeedback(`Simulation failed: ${message}`, true);
+        console.warn('[Sim] Backend simulation failed:', message);
+        return false;
+    }
+}
+
+function showSimFeedback(message, isError) {
+    const el = document.getElementById('simFeedback');
+    if (!el) return;
+    el.textContent = message || '';
+    el.style.color = isError ? 'var(--emergency-strong)' : 'var(--text-3)';
+}
+
 document.getElementById('simNormal').addEventListener('click', () => {
+    // The backend rejects NORMAL simulations, so this stays a local-only,
+    // UI-level normal-state demo. It never pretends a backend event was created
+    // and never moves the real device location (source stays 'DEMO').
     currentAlert = null;
     const location = generateRandomLocation();
     const event = {
@@ -1782,48 +1836,19 @@ document.getElementById('simNormal').addEventListener('click', () => {
         source: 'DEMO'
     };
     receiveEvent(event);
+    showSimFeedback('Normal simulation is local-only — the backend does not accept NORMAL triggers.');
 });
 
 document.getElementById('simSOS').addEventListener('click', () => {
-    const event = {
-        alertId: generateAlertId(),
-        trigger: 'SOS',
-        status: 'ACTIVE',
-        heartRate: null,
-        latitude: 22.3072,
-        longitude: 73.1812,
-        timestamp: new Date().toISOString(),
-        source: 'DEMO'
-    };
-    receiveEvent(event);
+    sendSimulationToBackend('SOS');
 });
 
 document.getElementById('simHeartRate').addEventListener('click', () => {
-    const event = {
-        alertId: generateAlertId(),
-        trigger: 'HEART_RATE',
-        status: 'ACTIVE',
-        heartRate: 142,
-        latitude: 22.3072,
-        longitude: 73.1812,
-        timestamp: new Date().toISOString(),
-        source: 'DEMO'
-    };
-    receiveEvent(event);
+    sendSimulationToBackend('HEART_RATE', 142);
 });
 
 document.getElementById('simSOSHeartRate').addEventListener('click', () => {
-    const event = {
-        alertId: generateAlertId(),
-        trigger: 'SOS_AND_HEART_RATE',
-        status: 'ACTIVE',
-        heartRate: 142,
-        latitude: 22.3072,
-        longitude: 73.1812,
-        timestamp: new Date().toISOString(),
-        source: 'DEMO'
-    };
-    receiveEvent(event);
+    sendSimulationToBackend('SOS_AND_HEART_RATE', 142);
 });
 
 /* ── Sign-in gate, identity, and monitored-user management ──────────────── */
