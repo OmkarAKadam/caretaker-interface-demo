@@ -89,7 +89,7 @@ const BUZZER_OFF_PHRASES = ['buzzer off', 'turn the buzzer off', 'disable buzzer
 const COMMAND_UNKNOWN_RESPONSE = 'I didn\'t understand. You can say emergency, buzzer on, or buzzer off.';
 
 const WALLE_ENDPOINT = `${API_BASE_URL}/api/walle/chat`;
-const WALLE_AI_TIMEOUT_MS = 15000;
+const WALLE_AI_TIMEOUT_MS = 90000;
 const WALLE_WAKE_PHRASES = [
     'wall-e',
     'wall e',
