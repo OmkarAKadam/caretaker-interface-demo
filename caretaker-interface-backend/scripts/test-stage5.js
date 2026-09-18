@@ -306,7 +306,8 @@ async function testNoSyntheticEvents(device) {
         currentServerModule.getLatestRuntimeState().eventCount === before,
         `count ${currentServerModule.getLatestRuntimeState().eventCount}`);
 
-    const hr = currentServerModule.getLatestRuntimeState().lastHeartRate;
+    const hrMap = currentServerModule.getLatestRuntimeState().lastHeartRate;
+    const hr = hrMap instanceof Map ? hrMap.get(device.identifier) : null;
     check('H4 normal HR still tracked in memory', Boolean(hr && hr.heartRate === 75), JSON.stringify(hr));
 }
 
@@ -384,7 +385,8 @@ async function testLatestStatePersistence(device) {
         const status = row.rows[0].device_status;
         check('L3 device status persisted', Boolean(status) && status.status === 'ONLINE', JSON.stringify(status));
         const hr = row.rows[0].heart_rate;
-        check('L4 heart-rate persisted', Boolean(hr) && hr.heartRate === 122, JSON.stringify(hr));
+        const hrEntry = hr && (hr[device.identifier] || (typeof hr.heartRate === 'number' ? hr : null));
+        check('L4 heart-rate persisted', Boolean(hrEntry) && hrEntry.heartRate === 122, JSON.stringify(hr));
         const fall = row.rows[0].fall;
         check('L5 fall persisted', Boolean(fall) && fall.deviceId === device.identifier, JSON.stringify(fall));
     }
@@ -397,8 +399,9 @@ async function testLatestStateRehydrate() {
         JSON.stringify(state.latestLocation));
     check('L7 device status rehydrated', Boolean(state.latestDeviceStatus && state.latestDeviceStatus.status === 'ONLINE'),
         JSON.stringify(state.latestDeviceStatus));
-    check('L8 heart rate rehydrated', Boolean(state.lastHeartRate && state.lastHeartRate.heartRate === 122),
-        JSON.stringify(state.lastHeartRate));
+    const hrEntry = state.lastHeartRate instanceof Map ? state.lastHeartRate.get(seedDeviceInfo.identifier) : null;
+    check('L8 heart rate rehydrated', Boolean(hrEntry && hrEntry.heartRate === 122),
+        JSON.stringify(hrEntry));
     check('L9 fall rehydrated', Boolean(state.latestFall && state.latestFall.deviceId), JSON.stringify(state.latestFall));
 }
 

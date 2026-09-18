@@ -101,7 +101,7 @@ let latestLocation = null;
 let latestDeviceStatus = null;
 let latestFall = null;
 let latestBuzzerState = null; // { state: 'ON'|'OFF', deviceId, updatedAt }
-let lastHeartRate = null;
+const heartRateByDevice = new Map();
 let mqttSeq = 0;
 
 // ── Stage 5 persistence (bounded, best-effort) ──────────────────────────
@@ -123,7 +123,7 @@ function snapshotRuntimeState() {
     return {
         location: latestLocation,
         deviceStatus: latestDeviceStatus,
-        heartRate: lastHeartRate,
+        heartRate: Object.fromEntries(heartRateByDevice),
         fall: latestFall,
         buzzer: latestBuzzerState
     };
@@ -197,6 +197,25 @@ async function persistEventStatusBestEffort(alertId, status) {
 // always flow through the queue: serialized, bounded, drop-oldest on overflow.
 function persistLatestStateBestEffort() {
     persistenceQueue.enqueue(Object.assign({ kind: 'latestState' }, snapshotRuntimeState()));
+}
+
+function updateHeartRateForDevice(deviceId, value, timestamp, receivedAt) {
+    const ts = isValidTimestamp(timestamp) ? timestamp : new Date().toISOString();
+    const current = heartRateByDevice.get(deviceId);
+    if (current) {
+        const currentMs = Date.parse(current.timestamp);
+        const incomingMs = Date.parse(ts);
+        if (!Number.isNaN(incomingMs) && !Number.isNaN(currentMs) && incomingMs <= currentMs) {
+            return false;
+        }
+    }
+    heartRateByDevice.set(deviceId, {
+        deviceId,
+        heartRate: value,
+        timestamp: ts,
+        receivedAt: receivedAt || new Date().toISOString()
+    });
+    return true;
 }
 
 const HEART_RATE_COOLDOWN_MS = 30000;
@@ -581,13 +600,12 @@ function handleHeartRateMessage(payload) {
             ? payload.deviceId
             : 'unknown';
 
-    lastHeartRate = {
-        deviceId,
-        heartRate: raw,
-        timestamp: isValidTimestamp(payload.timestamp) ? payload.timestamp : new Date().toISOString(),
-        receivedAt: new Date().toISOString()
-    };
-    persistLatestStateBestEffort();
+    const timestamp = isValidTimestamp(payload.timestamp) ? payload.timestamp : new Date().toISOString();
+    const receivedAt = new Date().toISOString();
+
+    if (updateHeartRateForDevice(deviceId, raw, timestamp, receivedAt)) {
+        persistLatestStateBestEffort();
+    }
 
     const abnormal = raw < HEART_RATE_ALERT_LOW || raw > HEART_RATE_ALERT_HIGH;
 
@@ -611,7 +629,7 @@ function handleHeartRateMessage(payload) {
         heartRate: raw,
         latitude: null,
         longitude: null,
-        timestamp: lastHeartRate.timestamp,
+        timestamp,
         source: 'mqtt',
         deviceId
     };
@@ -909,13 +927,10 @@ app.post('/api/events', requireDeviceAuth, deviceEventsLimiter, async (req, res,
     // the caretaker dashboard see it; this mirrors handleHeartRateMessage.
     const hr = result.event.heartRate;
     if (typeof hr === 'number' && Number.isFinite(hr) && hr > 0 && hr <= 400) {
-        lastHeartRate = {
-            deviceId: req.device.identifier,
-            heartRate: hr,
-            timestamp: result.event.timestamp || new Date().toISOString(),
-            receivedAt: new Date().toISOString()
-        };
-        persistLatestStateBestEffort();
+        const timestamp = result.event.timestamp || new Date().toISOString();
+        if (updateHeartRateForDevice(req.device.identifier, hr, timestamp, new Date().toISOString())) {
+            persistLatestStateBestEffort();
+        }
     }
 
     // 201 ⇒ durable-in-DB or queued-for-retry; never throws.
@@ -1130,9 +1145,11 @@ function scopeRuntimeStateForDevice(device, runtimeState) {
         runtimeState.latestDeviceStatus.deviceId === identifier) {
         scoped.latestDeviceStatus = runtimeState.latestDeviceStatus;
     }
-    if (runtimeState.lastHeartRate &&
-        runtimeState.lastHeartRate.deviceId === identifier) {
-        scoped.lastHeartRate = runtimeState.lastHeartRate;
+    const heartRateEntry = runtimeState.lastHeartRate instanceof Map
+        ? runtimeState.lastHeartRate.get(identifier)
+        : null;
+    if (heartRateEntry) {
+        scoped.lastHeartRate = heartRateEntry;
     }
     if (runtimeState.latestFall &&
         runtimeState.latestFall.deviceId === identifier) {
@@ -1202,7 +1219,7 @@ app.post('/api/walle/chat', requireDeviceAuth, async (req, res) => {
         scopeRuntimeStateForDevice(req.device, {
             latestLocation,
             latestDeviceStatus,
-            lastHeartRate,
+            lastHeartRate: heartRateByDevice,
             latestFall,
             latestBuzzerState
         }),
@@ -1395,13 +1412,10 @@ app.post('/api/caretaker/simulate-event', requireAuth, requireRole('CARETAKER'),
         // exact device.
         const hrValue = result.event.heartRate;
         if (typeof hrValue === 'number' && Number.isFinite(hrValue) && hrValue > 0 && hrValue <= 400) {
-            lastHeartRate = {
-                deviceId: deviceRow.device_identifier,
-                heartRate: hrValue,
-                timestamp: result.event.timestamp || new Date().toISOString(),
-                receivedAt: new Date().toISOString()
-            };
-            persistLatestStateBestEffort();
+            const timestamp = result.event.timestamp || new Date().toISOString();
+            if (updateHeartRateForDevice(deviceRow.device_identifier, hrValue, timestamp, new Date().toISOString())) {
+                persistLatestStateBestEffort();
+            }
         }
 
         await persistEventBestEffort(result.event);
@@ -1459,7 +1473,22 @@ async function bootRehydrateFromDatabase() {
         if (latestState) {
             if (latestState.location) latestLocation = latestState.location;
             if (latestState.deviceStatus) latestDeviceStatus = latestState.deviceStatus;
-            if (latestState.heartRate) lastHeartRate = latestState.heartRate;
+            if (latestState.heartRate) {
+                heartRateByDevice.clear();
+                const raw = latestState.heartRate;
+                const restoreEntry = (deviceId, entry) => {
+                    if (entry && typeof entry === 'object' && typeof entry.heartRate === 'number') {
+                        heartRateByDevice.set(deviceId, Object.assign({ deviceId }, entry));
+                    }
+                };
+                if (typeof raw.deviceId === 'string' && typeof raw.heartRate === 'number') {
+                    restoreEntry(raw.deviceId, raw);
+                } else {
+                    for (const [deviceId, entry] of Object.entries(raw)) {
+                        restoreEntry(deviceId, entry);
+                    }
+                }
+            }
             if (latestState.fall) latestFall = latestState.fall;
             if (latestState.buzzer) latestBuzzerState = latestState.buzzer;
         }
@@ -1482,7 +1511,7 @@ function getLatestRuntimeState() {
     return {
         latestLocation,
         latestDeviceStatus,
-        lastHeartRate,
+        lastHeartRate: heartRateByDevice,
         latestFall,
         latestBuzzerState,
         mqttSeq,

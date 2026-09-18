@@ -456,7 +456,7 @@ async function phase2Hardened() {
     const runtime = {
         latestLocation: { deviceId: devX.identifier, blindUserId: x.id, latitude: 22.1, longitude: 73.2, timestamp: nowIso() },
         latestDeviceStatus: { deviceId: devX.identifier, status: 'ONLINE', receivedAt: nowIso() },
-        lastHeartRate: { deviceId: devY.identifier, heartRate: 122, timestamp: nowIso() },
+        lastHeartRate: new Map([[devY.identifier, { deviceId: devY.identifier, heartRate: 122, timestamp: nowIso() }]]),
         latestFall: { deviceId: 'unknown', timestamp: nowIso() },
         latestBuzzerState: 'ON'
     };

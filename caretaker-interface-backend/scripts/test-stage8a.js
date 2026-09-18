@@ -295,7 +295,7 @@ function testContextIsolation(state) {
     const runtime = {
         latestLocation: { deviceId: state.devX.identifier, blindUserId: state.x.id, latitude: 22.1, longitude: 73.2, timestamp: nowIso() },
         latestDeviceStatus: { deviceId: state.devX.identifier, status: 'ONLINE', receivedAt: nowIso() },
-        lastHeartRate: { deviceId: state.devY.identifier, heartRate: 122, timestamp: nowIso() },
+        lastHeartRate: new Map([[state.devY.identifier, { deviceId: state.devY.identifier, heartRate: 122, timestamp: nowIso() }]]),
         latestFall: { deviceId: state.devZ.identifier, timestamp: nowIso() },
         latestBuzzerState: 'ON'
     };
@@ -318,7 +318,7 @@ function testContextIsolation(state) {
     check('ctx: Y does NOT receive Z fall', !scopedY.latestFall, JSON.stringify(scopedY.latestFall));
 
     // A piece with 'unknown' device identity must never be guessed either way.
-    const unattributed = { lastHeartRate: { deviceId: 'unknown', heartRate: 90, timestamp: nowIso() } };
+    const unattributed = { lastHeartRate: new Map([['unknown', { deviceId: 'unknown', heartRate: 90, timestamp: nowIso() }]]) };
     const scopedX2 = currentServerModule.scopeRuntimeStateForDevice(devX, unattributed);
     check('ctx: unknown-identity heart-rate omitted', !scopedX2.lastHeartRate, JSON.stringify(scopedX2.lastHeartRate));
 }
