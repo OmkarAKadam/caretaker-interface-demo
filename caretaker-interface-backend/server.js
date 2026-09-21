@@ -224,6 +224,24 @@ const HEART_RATE_ALERT_HIGH = 100;
 const lastHeartRateAlertAt = {};
 const sseClients = new Set();
 
+// ── Obstacle deduplication (per-device, in-memory) ──────────────────────
+// A rotating ESP32 radar reports every sweep sample. The same obstacle can
+// therefore appear in many consecutive readings (LEFT, LEFT, LEFT, ...) which
+// previously produced one event — and one Blind Client voice interjection —
+// per reading. State is kept per device identifier (mirroring the heart-rate
+// pattern above) and suppresses repeats while an obstacle stays active.
+//
+// Threshold parity with ESP32 firmware: only readings <= 100 cm are
+// obstacles; a no-echo reading (-1) or anything beyond the threshold is CLEAR
+// and resets the device's state so a later detection alerts again.
+const OBSTACLE_DISTANCE_CM = 100;
+const OBSTACLE_REQUIRED_CONSECUTIVE = 2;
+// Backstop against rapid sensor-sector flapping (e.g. an obstacle straddling
+// the LEFT/CENTER angle boundary). If a new obstacle direction is confirmed
+// within this window the alert is deferred until the window has passed.
+const OBSTACLE_REALERT_COOLDOWN_MS = envPositiveInt('OBSTACLE_REALERT_COOLDOWN_MS', 3000);
+const obstacleStateByDevice = new Map();
+
 // Stage 8B: cap on concurrent SSE connections per instance. Bounds memory and
 // the abuse surface while keeping the normal demo consoles connected.
 const SSE_MAX_CLIENTS = envPositiveInt('SSE_MAX_CLIENTS', 30);
@@ -431,10 +449,61 @@ function handleRadarMessage(payload) {
     const direction = payload && payload.direction;
     const trigger = RADAR_DIRECTION_MAP[direction];
     const hasDistance =
-        payload && typeof payload.distance === 'number' && Number.isFinite(payload.distance) && payload.distance >= 0;
+        payload && typeof payload.distance === 'number' && Number.isFinite(payload.distance);
 
     if (!trigger || !hasDistance) {
         console.warn(`[MQTT] Invalid radar payload — direction="${String(direction)}", distance=${payload ? payload.distance : 'missing'}`);
+        return;
+    }
+
+    const deviceId =
+        payload && typeof payload.deviceId === 'string' && payload.deviceId.trim() !== ''
+            ? payload.deviceId
+            : 'unknown';
+
+    let state = obstacleStateByDevice.get(deviceId) ||
+        { direction: null, consecutive: 0, active: false, lastAlertAt: 0 };
+
+    // No echo (-1) or beyond the obstacle threshold: CLEAR. Never an event.
+    // Resets this device's state so a later detection produces a fresh alert.
+    if (payload.distance < 0 || payload.distance > OBSTACLE_DISTANCE_CM) {
+        obstacleStateByDevice.set(deviceId, {
+            direction: null,
+            consecutive: 0,
+            active: false,
+            lastAlertAt: 0
+        });
+        console.log(`[MQTT] Radar clear (${payload.distance} cm) — obstacle state reset for ${deviceId}.`);
+        return;
+    }
+
+    if (state.direction !== direction) {
+        // New (or first) direction: requires a fresh 2-reading confirmation.
+        state.direction = direction;
+        state.consecutive = 0;
+        state.active = false;
+    }
+    state.consecutive += 1;
+
+    if (state.active) {
+        // Already alerted for this obstacle direction — repeat readings are
+        // suppressed (no event, no SSE, no TTS).
+        console.log(`[MQTT] Radar ${direction} repeated (${payload.distance} cm) — suppressed for ${deviceId}.`);
+        obstacleStateByDevice.set(deviceId, state);
+        return;
+    }
+
+    if (state.consecutive < OBSTACLE_REQUIRED_CONSECUTIVE) {
+        console.log(`[MQTT] Radar ${direction} reading (${payload.distance} cm) — confirming (${state.consecutive}/${OBSTACLE_REQUIRED_CONSECUTIVE}).`);
+        obstacleStateByDevice.set(deviceId, state);
+        return;
+    }
+
+    // Confirmed detection, but inside the realert backstop window (rapid
+    // sensor-sector flapping): stay quiet until the window has passed.
+    if (Date.now() - state.lastAlertAt < OBSTACLE_REALERT_COOLDOWN_MS) {
+        console.log(`[MQTT] Radar ${direction} confirmed (${payload.distance} cm) — within realert cooldown, suppressed for ${deviceId}.`);
+        obstacleStateByDevice.set(deviceId, state);
         return;
     }
 
@@ -447,7 +516,7 @@ function handleRadarMessage(payload) {
         longitude: null,
         timestamp: isValidTimestamp(payload.timestamp) ? payload.timestamp : new Date().toISOString(),
         source: 'mqtt',
-        deviceId: payload.deviceId,
+        deviceId,
         distance: payload.distance,
         angle: Number.isFinite(payload.angle) ? payload.angle : null,
         danger: payload.danger
@@ -455,11 +524,15 @@ function handleRadarMessage(payload) {
 
     const result = createEvent(event, { allowMissingCoordinates: true });
     if (result.ok) {
+        state.active = true;
+        state.lastAlertAt = Date.now();
         console.log(`[MQTT] Radar event → ${trigger} (alertId ${result.event.alertId})`);
         persistEventBestEffort(result.event);
     } else {
         console.warn(`[MQTT] Radar event skipped: ${result.error}`);
     }
+
+    obstacleStateByDevice.set(deviceId, state);
 }
 
 function handleSosMessage(payload) {
@@ -1512,6 +1585,7 @@ function getLatestRuntimeState() {
         latestLocation,
         latestDeviceStatus,
         lastHeartRate: heartRateByDevice,
+        obstacleState: obstacleStateByDevice,
         latestFall,
         latestBuzzerState,
         mqttSeq,
@@ -1563,6 +1637,9 @@ module.exports = {
     persistEventBestEffort,
     EVENTS_WINDOW_MAX,
     TELEMETRY_QUEUE_MAX,
+    OBSTACLE_DISTANCE_CM,
+    OBSTACLE_REQUIRED_CONSECUTIVE,
+    OBSTACLE_REALERT_COOLDOWN_MS,
     scopeRuntimeStateForDevice,
     EVENT_MESSAGE_MAX,
     getSseClientCount
