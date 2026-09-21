@@ -88,6 +88,17 @@ async function listAuthorizedDevicesForCaretaker(caretakerId) {
     return result.rows;
 }
 
+// Every registered device identifier, regardless of ownership. Used at boot so
+// the heart-rate monitor adopts every registered cap device (auto-monitoring is
+// per-device and backend-driven; presence of a MAX30102 is optional — devices
+// without one simply time out and reschedule).
+async function listAllDeviceIdentifiers() {
+    const result = await query(
+        `SELECT device_identifier FROM devices ORDER BY device_identifier`
+    );
+    return result.rows;
+}
+
 // Throttled by the caller. Flips the device ONLINE and refreshes last_seen_at.
 async function touchDeviceSeen(deviceId) {
     await query(
@@ -138,6 +149,7 @@ module.exports = {
     getDeviceById,
     listDevicesForBlindUser,
     listAuthorizedDevicesForCaretaker,
+    listAllDeviceIdentifiers,
     touchDeviceSeen,
     rotateDeviceSecret,
     deleteDevice

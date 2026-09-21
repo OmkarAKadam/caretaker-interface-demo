@@ -556,7 +556,8 @@ function updateAlertDetails(event) {
     document.getElementById('selectedLng').textContent = typeof event.longitude === 'number' ? event.longitude.toFixed(4) : '—';
 }
 
-function updateHeartRateDisplay(event) {
+function renderHeartRateCardFromEvent(event) {
+    if (!event) return;
     const hrValueEl = document.getElementById('heartRateValue');
     const hrStatusEl = document.getElementById('heartRateStatus');
     const hrUpdatedEl = document.getElementById('heartRateUpdated');
@@ -592,11 +593,11 @@ function updateHeartRateDisplay(event) {
     hrStatusEl.innerHTML = `<span class="badge-dot"></span>${hrStatusText}`;
 
     if (event.heartRate !== null && event.heartRate !== undefined) {
-        hrUpdatedEl.textContent = `Last valid reading · ${formatTime(event.timestamp)}`;
+        hrUpdatedEl.textContent = `Last valid reading · ${event.timestamp ? formatTime(event.timestamp) : '—'}`;
         hrValueEl.style.opacity = '1';
         pulseEl.classList.remove('stop');
     } else {
-        hrUpdatedEl.textContent = event.status === 'NORMAL' ? `Checked ${formatTime(event.timestamp)}` : 'No reading available';
+        hrUpdatedEl.textContent = event.status === 'NORMAL' ? `Checked ${event.timestamp ? formatTime(event.timestamp) : '—'}` : 'No reading available';
         hrValueEl.style.opacity = '1';
         pulseEl.classList.add('stop');
     }
@@ -610,6 +611,62 @@ function updateHeartRateDisplay(event) {
         rangeNeedleEl.style.opacity = '0';
         rangeNeedleEl.style.left = '26%';
     }
+}
+
+function renderHeartRateCardFromDevice(reading) {
+    if (!reading || typeof reading.bpm !== 'number' || !isFinite(reading.bpm)) return;
+    const hrValueEl = document.getElementById('heartRateValue');
+    const hrStatusEl = document.getElementById('heartRateStatus');
+    const hrUpdatedEl = document.getElementById('heartRateUpdated');
+    const pulseEl = document.getElementById('pulseWave');
+    const rangeNeedleEl = document.getElementById('hrRangeNeedle');
+    if (!hrValueEl || !hrStatusEl || !hrUpdatedEl || !pulseEl || !rangeNeedleEl) return;
+
+    const classification = ['NORMAL', 'HIGH', 'LOW'].indexOf(reading.classification) !== -1
+        ? reading.classification
+        : heartRateClassification({ heartRate: reading.bpm });
+
+    const label = classification === 'HIGH' ? 'High' : classification === 'LOW' ? 'Low' : 'Normal';
+    const color = classification === 'HIGH' ? 'var(--warn)' : classification === 'LOW' ? 'var(--emergency)' : 'var(--ok)';
+    const badge = classification === 'HIGH' ? 'b-warning' : classification === 'LOW' ? 'b-critical' : 'b-normal';
+
+    hrValueEl.innerHTML = `${reading.bpm}<span class="vital-unit">BPM</span>`;
+    hrValueEl.style.color = color;
+    hrValueEl.style.opacity = '1';
+    hrStatusEl.className = `hr-status-badge ${badge}`;
+    hrStatusEl.innerHTML = `<span class="badge-dot"></span>${label}`;
+    hrUpdatedEl.textContent = `Last valid reading · ${reading.timestamp ? formatTime(reading.timestamp) : '—'}`;
+    pulseEl.classList.remove('stop');
+
+    rangeNeedleEl.style.backgroundColor = color;
+    const pct = Math.max(0, Math.min(100, ((reading.bpm - 40) / 160) * 100));
+    rangeNeedleEl.style.left = `${pct}%`;
+    rangeNeedleEl.style.opacity = '1';
+}
+
+function hasValidDeviceHeartRate() {
+    return !!selectedDeviceId
+        && deviceHeartRateSource
+        && typeof deviceHeartRateSource.bpm === 'number'
+        && isFinite(deviceHeartRateSource.bpm);
+}
+
+// Top HEART RATE card priority: the selected device's device-scoped reading
+// (state.lastReading from GET /api/caretaker/devices/:deviceId/heart-rate) is
+// ALWAYS the source of truth while a valid reading exists — a generic
+// event-stream heart rate can never overwrite it, regardless of timestamps.
+// Only when no device is selected or no valid device reading exists do we fall
+// back to the existing event/global HR rendering.
+function refreshTopHeartRateCard(event) {
+    if (hasValidDeviceHeartRate()) {
+        renderHeartRateCardFromDevice(deviceHeartRateSource);
+        return;
+    }
+    renderHeartRateCardFromEvent(event || currentAlert || { trigger: 'NORMAL', status: 'NORMAL', heartRate: null, timestamp: null });
+}
+
+function updateHeartRateDisplay(event) {
+    refreshTopHeartRateCard(event);
 }
 
 function handleEvent(event) {
@@ -1102,6 +1159,222 @@ async function receiveEventFromAPI(event) {
     receiveEvent(event);
 }
 
+// ── Heart-rate request + monitoring review ────────────────────────────────
+// Wires the on-demand heart-rate feature of the caretaker dashboard to the
+// caretaker-facing REST API (the deliberate "Gemini"-free contract):
+//
+//   • POST /api/caretaker/devices/:deviceId/heart-rate-request  → asks the
+//     cap for ONE on-demand reading (back-end returns the joined reading, or
+//     503 when the MQTT command channel is unavailable).
+//   • GET  /api/caretaker/devices/:deviceId/heart-rate           → engine
+//     state + latest reading for the selected device.
+//   • GET  /api/caretaker/devices/:deviceId/heart-rate/history   → newest
+//     readings, scoped to the selected device.
+const HEART_RATE_CLASS_LOW = 60;   // BPM — below this the backend classifies LOW.
+const HEART_RATE_CLASS_HIGH = 100; // BPM — above this the backend classifies HIGH.
+let heartRateRequestPending = false;
+
+// Top HEART RATE card source-of-truth state. When a monitored device is
+// selected and its device-scoped state (GET .../heart-rate) reports a valid
+// lastReading, `deviceHeartRateSource` is held and the top card ALWAYS renders
+// it — a generic event-stream heart rate never overrides the selected device's
+// reading. Without a selected device / valid reading, the card falls back to
+// the existing event-driven rendering.
+let deviceHeartRateSource = null; // { bpm, classification, timestamp }
+
+function heartRateDeviceRowVisible() {
+    const row = document.getElementById('deviceHrMonRow');
+    return !!(row && getComputedStyle(row).display !== 'none');
+}
+
+function heartRateClassification(reading) {
+    const value = reading && reading.classification;
+    if (value === 'NORMAL' || value === 'HIGH' || value === 'LOW') return value;
+    const bpm = reading && reading.heartRate;
+    if (typeof bpm === 'number' && isFinite(bpm)) {
+        return bpm > HEART_RATE_CLASS_HIGH ? 'HIGH' : bpm < HEART_RATE_CLASS_LOW ? 'LOW' : 'NORMAL';
+    }
+    return 'NORMAL';
+}
+
+function renderHeartRateState(state) {
+    const monValue = document.getElementById('deviceHrMonValue');
+    const hrValue = document.getElementById('deviceHrValue');
+    if (!monValue) return;
+
+    const reading = state && state.lastReading;
+    const bpm = reading && reading.heartRate != null ? reading.heartRate : null;
+    const mode = (state && state.monitoringMode) || 'NORMAL';
+    const classification = bpm === null ? null : heartRateClassification(reading);
+
+    const dotClass = classification === null
+        ? 'off'
+        : (classification === 'NORMAL' ? 'ok' : 'warn');
+    const modeLabel = bpm === null ? 'NO READING' : mode;
+
+    monValue.innerHTML = `<span class="row-dot ${dotClass}"></span>${modeLabel}`;
+    if (hrValue) {
+        hrValue.innerHTML = bpm === null
+            ? '<span class="row-dot acid"></span>—'
+            : `<span class="row-dot ${dotClass}"></span>${bpm} BPM`;
+    }
+}
+
+function renderHeartRateHistory(readings) {
+    const listEl = document.getElementById('hrHistoryList');
+    const countEl = document.getElementById('hrHistoryCount');
+    const emptyEl = document.getElementById('hrHistoryEmpty');
+    if (!listEl || !countEl) return;
+
+    const items = (readings || []).filter((r) => r && typeof r.heartRate === 'number');
+
+    if (countEl) countEl.textContent = `${items.length} reading${items.length === 1 ? '' : 's'}`;
+    if (emptyEl) emptyEl.hidden = items.length > 0;
+
+    listEl.textContent = '';
+    items.forEach((reading) => {
+        const classification = heartRateClassification(reading);
+        const cls = classification.toLowerCase();
+        const readingType = String(reading.readingType || 'MANUAL').toUpperCase();
+        const timestamp = reading.timestamp || null;
+        const timeLabel = timestamp ? formatTime(timestamp) : '—';
+        const item = document.createElement('div');
+        item.className = `history-item is-${cls}`;
+        item.innerHTML = `
+            <span class="history-rail"><span class="history-dot ${cls}"></span></span>
+            <div class="history-main">
+                <div class="history-headline">
+                    <b class="history-heart-rate">${reading.heartRate} BPM</b>
+                    <span class="history-reading-type">${readingType}</span>
+                </div>
+                <div class="history-meta">
+                    <span class="history-time">${timeLabel}</span>
+                </div>
+            </div>
+            <span class="history-status ${cls}">${classification}</span>
+        `;
+        listEl.appendChild(item);
+    });
+}
+
+async function refreshHeartRateForSelectedDevice() {
+    const device = selectedDevice();
+    if (!device || !selectedDeviceId) {
+        deviceHeartRateSource = null;
+        renderHeartRateState(null);
+        renderHeartRateHistory([]);
+        refreshTopHeartRateCard(currentAlert);
+        return;
+    }
+    const base = `${API_BASE_URL}/api/caretaker/devices/${encodeURIComponent(device.id)}/heart-rate`;
+
+    try {
+        const stateRes = await fetch(base, { headers: { 'Accept': 'application/json' }, credentials: 'include' });
+        if (!stateRes.ok) throw new Error(`HTTP ${stateRes.status}`);
+        const state = await stateRes.json();
+        renderHeartRateState(state);
+
+        const historyRes = await fetch(`${base}/history?limit=50`, { headers: { 'Accept': 'application/json' }, credentials: 'include' });
+        let historyReading = null;
+        if (historyRes.ok) {
+            const history = await historyRes.json();
+            const readings = Array.isArray(history) ? history : (history && Array.isArray(history.readings) ? history.readings : []);
+            renderHeartRateHistory(readings);
+
+            // Backend returns history newest-first — readings[0] is the latest.
+            const latest = readings.find((r) => r && typeof r.heartRate === 'number' && isFinite(r.heartRate));
+            if (latest) {
+                historyReading = latest;
+            }
+        }
+
+        // Newest device-scoped HR-history entry is authoritative for the top
+        // card. state.lastReading is only a fallback when the history has no
+        // valid latest reading (never allowed to overwrite a newer history one,
+        // because the history-derived source is set only when preferred).
+        const source = historyReading || (state && state.lastReading);
+        if (source && typeof source.heartRate === 'number' && isFinite(source.heartRate)) {
+            deviceHeartRateSource = {
+                bpm: source.heartRate,
+                classification: heartRateClassification(source),
+                timestamp: source.timestamp || null
+            };
+        } else {
+            deviceHeartRateSource = null;
+        }
+
+        refreshTopHeartRateCard(currentAlert);
+    } catch (error) {
+        console.warn('[HR] Failed to load heart-rate state/history:', error.message || error);
+        renderHeartRateState(null);
+        refreshTopHeartRateCard(currentAlert);
+    }
+}
+
+async function requestHeartRateNow() {
+    const device = selectedDevice();
+    const btn = document.getElementById('heartRateRequestBtn');
+    const note = document.getElementById('heartRateRequestNote');
+
+    if (!device || !selectedDeviceId) {
+        if (note) note.textContent = 'Select a device before asking for a reading.';
+        return;
+    }
+    if (heartRateRequestPending) {
+        if (note) note.textContent = 'A heart-rate request is already in flight for this device.';
+        return;
+    }
+
+    heartRateRequestPending = true;
+    if (btn) {
+        btn.disabled = true;
+        btn.textContent = 'Requesting…';
+    }
+    if (note) note.textContent = 'Sending on-demand request to the cap…';
+
+    try {
+        const response = await fetch(
+            `${API_BASE_URL}/api/caretaker/devices/${encodeURIComponent(device.id)}/heart-rate-request`,
+            { method: 'POST', headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' }, credentials: 'include' }
+        );
+        const body = await response.json().catch(() => null);
+
+        if (response.status === 503) {
+            if (note) note.textContent = (body && body.error) || 'Command channel unavailable — heartbeat hardware not installed?';
+            return;
+        }
+        if (!response.ok) {
+            if (note) note.textContent = (body && body.error) || `Request failed (HTTP ${response.status}).`;
+            return;
+        }
+
+        const reading = body && body.reading;
+        if (note) {
+            note.textContent = reading && reading.heartRate != null
+                ? `Fresh reading received — ${reading.heartRate} BPM.`
+                : 'Request sent; awaiting a fresh reading.';
+        }
+        await refreshHeartRateForSelectedDevice();
+    } catch (error) {
+        if (note) note.textContent = 'Could not reach the backend for this request.';
+        console.warn('[HR] Heart-rate request failed:', error.message || error);
+    } finally {
+        heartRateRequestPending = false;
+        if (btn) {
+            btn.disabled = false;
+            btn.textContent = 'Get Heart Rate';
+        }
+    }
+}
+
+function wireHeartRateControls() {
+    const btn = document.getElementById('heartRateRequestBtn');
+    if (btn && !btn.dataset.caretakerWired) {
+        btn.addEventListener('click', () => requestHeartRateNow());
+        btn.dataset.caretakerWired = '1';
+    }
+}
+
 async function apiPollLoop(epoch) {
     if (!isApiPollingRunning || epoch !== apiPollingEpoch) return;
 
@@ -1112,6 +1385,8 @@ async function apiPollLoop(epoch) {
         await receiveEventFromAPI(events);
         await loadWalleSessions();
         await refreshDevices();
+        wireHeartRateControls();
+        await refreshHeartRateForSelectedDevice();
     } catch (error) {
         if (apiStatus !== 'offline') {
             console.warn('[API] Polling failed:', error.message || error);
@@ -1898,6 +2173,8 @@ function startDashboard() {
     initializeFromHistory();
     tickClock();
     setInterval(tickClock, 1000);
+
+    startApiPolling();
 }
 
 function showAuthOverlay(message) {
@@ -2146,6 +2423,8 @@ function clearDashboardData() {
     walleSessions = [];
     walleSessionsSignature = '';
     selectedWalleSessionId = null;
+
+    deviceHeartRateSource = null;
 
     const historyList = document.getElementById('alertHistoryList');
     if (historyList) historyList.innerHTML = '';

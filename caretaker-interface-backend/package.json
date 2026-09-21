@@ -16,7 +16,8 @@
     "test:stage8a": "node --env-file-if-exists=.env scripts/test-stage8a.js",
     "test:stage8b": "node --env-file-if-exists=.env scripts/test-stage8b.js",
     "test:hrstate": "node --env-file-if-exists=.env scripts/test-hr-state.js",
-    "test:obstacle": "node --env-file-if-exists=.env scripts/test-obstacle.js"
+    "test:obstacle": "node --env-file-if-exists=.env scripts/test-obstacle.js",
+    "test:hrmonitor": "node --env-file-if-exists=.env scripts/test-heart-rate-monitor.js"
   },
   "license": "UNLICENSED",
   "private": true,

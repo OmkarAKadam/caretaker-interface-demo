@@ -317,6 +317,105 @@ async function loadLatestState() {
 }
 
 // ---------------------------------------------------------------------------
+// Heart-rate history (on-demand monitoring)
+// ---------------------------------------------------------------------------
+// Persists normal + abnormal readings from all three sources (CONTINUOUS
+// telemetry, MANUAL caretaker requests, AUTOMATIC backend schedule) WITHOUT
+// turning them into alert events. Identity is resolved like mapEventForInsert:
+// the string device identifier is always stored, and the UUID FKs are resolved
+// for ownership joins when the device is a registered cap record.
+
+async function mapHeartRateEntryForInsert(entry) {
+    const deviceId = await resolveDeviceUuid(entry.deviceId || entry.deviceIdentifier || null);
+    let blindUserId = await resolveBlindUserUuid(entry.blindUserId || null);
+    if (!blindUserId && deviceId) {
+        const owner = await query(
+            `SELECT blind_user_id FROM devices WHERE id = $1`,
+            [deviceId]
+        );
+        if (owner.rows.length && owner.rows[0].blind_user_id) {
+            blindUserId = owner.rows[0].blind_user_id;
+        }
+    }
+    const heartRate = Math.max(0, Math.min(400, Math.round(entry.heartRate)));
+    return {
+        deviceId,
+        blindUserId,
+        deviceIdentifier: entry.deviceIdentifier || entry.deviceId || null,
+        heartRate,
+        classification: entry.classification || 'NORMAL',
+        readingType: entry.readingType || 'CONTINUOUS',
+        requestId: entry.requestId || null,
+        occurredAt: entry.timestamp || new Date().toISOString()
+    };
+}
+
+// Idempotent insert: the dedup unique index makes a repeated delivery of the
+// same reading (queued retry, MQTT redelivery, duplicate beat) a no-op.
+async function insertHeartRateHistory(row) {
+    const result = await query(
+        `INSERT INTO heart_rate_history (
+            blind_user_id, device_id, device_identifier, heart_rate,
+            classification, reading_type, request_id, occurred_at
+         ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+         ON CONFLICT (device_identifier, occurred_at, heart_rate, reading_type) DO NOTHING
+         RETURNING id`,
+        [
+            row.blindUserId, row.deviceId, row.deviceIdentifier,
+            row.heartRate, row.classification, row.readingType,
+            row.requestId || null, row.occurredAt
+        ]
+    );
+    return result.rows.length > 0;
+}
+
+const HEART_RATE_HISTORY_SELECT_COLUMNS = `
+    device_identifier,
+    heart_rate,
+    classification,
+    reading_type,
+    request_id,
+    occurred_at
+`;
+
+function heartRateRowToReading(row) {
+    return {
+        deviceId: row.device_identifier,
+        heartRate: row.heart_rate,
+        classification: row.classification,
+        readingType: row.reading_type,
+        requestId: row.request_id || null,
+        timestamp: row.occurred_at ? new Date(row.occurred_at).toISOString() : row.occurred_at
+    };
+}
+
+// The `limit` most recent readings of ONE registered device, newest-first.
+async function listHeartRateHistoryForDevice(deviceIdentifier, limit) {
+    const result = await query(
+        `SELECT ${HEART_RATE_HISTORY_SELECT_COLUMNS}
+         FROM heart_rate_history
+         WHERE device_identifier = $1
+         ORDER BY occurred_at DESC, id DESC
+         LIMIT $2`,
+        [deviceIdentifier, limit]
+    );
+    return result.rows.map(heartRateRowToReading);
+}
+
+// Recent readings across all devices, newest-first. Used by boot rehydration so
+// the in-memory monitoring engine resumes from persisted history after restart.
+async function listRecentHeartRateHistory(limit) {
+    const result = await query(
+        `SELECT ${HEART_RATE_HISTORY_SELECT_COLUMNS}
+         FROM heart_rate_history
+         ORDER BY occurred_at DESC, id DESC
+         LIMIT $1`,
+        [limit]
+    );
+    return result.rows.map(heartRateRowToReading);
+}
+
+// ---------------------------------------------------------------------------
 // Wall-E conversations (walle_sessions / walle_messages)
 // ---------------------------------------------------------------------------
 
@@ -416,5 +515,9 @@ module.exports = {
     listWallTurns,
     listWallSessions,
     listRecentEventsForBlindUser,
-    listRecentEventsForDevice
+    listRecentEventsForDevice,
+    mapHeartRateEntryForInsert,
+    insertHeartRateHistory,
+    listHeartRateHistoryForDevice,
+    listRecentHeartRateHistory
 };

@@ -19,6 +19,7 @@ const deviceQueries = require('./devices/queries');
 const queries = require('./telemetry/queries');
 const { createPersistenceQueue } = require('./telemetry/queue');
 const { createRateLimiter } = require('./auth/rate-limit');
+const { createHeartRateMonitor } = require('./heart-rate/monitor');
 const { securityHeaders } = require('./security-headers');
 
 const app = express();
@@ -146,6 +147,8 @@ function applyPersistence(item) {
                 fall: item.fall,
                 buzzer: item.buzzer
             });
+        case 'heartRate':
+            return queries.insertHeartRateHistory(item);
         default:
             return false;
     }
@@ -199,6 +202,27 @@ function persistLatestStateBestEffort() {
     persistenceQueue.enqueue(Object.assign({ kind: 'latestState' }, snapshotRuntimeState()));
 }
 
+// Heart-rate readings mirror the event persistence contract: resolve identity
+// against the database, insert, and only when the INSERT fails queue the
+// already-mapped row for retry (the dedup index makes retries safe). When even
+// identity resolution fails (database unreachable) the reading is dropped —
+// same best-effort policy as persistEventBestEffort.
+async function persistHeartRateBestEffort(entry) {
+    try {
+        const mapped = await queries.mapHeartRateEntryForInsert(entry);
+        try {
+            await queries.insertHeartRateHistory(mapped);
+        } catch (dbErr) {
+            persistenceQueue.enqueue(Object.assign({ kind: 'heartRate' }, mapped));
+            console.warn('[Persistence] DB unavailable — heart-rate reading queued for retry:', dbErr && dbErr.message ? dbErr.message : dbErr);
+        }
+        return true;
+    } catch (err) {
+        console.error('[Persistence] Heart-rate history persistence failed:', err && err.message ? err.message : err);
+        return false;
+    }
+}
+
 function updateHeartRateForDevice(deviceId, value, timestamp, receivedAt) {
     const ts = isValidTimestamp(timestamp) ? timestamp : new Date().toISOString();
     const current = heartRateByDevice.get(deviceId);
@@ -223,6 +247,31 @@ const HEART_RATE_ALERT_LOW = 60;
 const HEART_RATE_ALERT_HIGH = 100;
 const lastHeartRateAlertAt = {};
 const sseClients = new Set();
+
+// ── On-demand heart-rate monitoring (per-device, backend-controlled) ────────
+// Reuses the exact abnormal thresholds above. The engine issues GET_HEART_RATE
+// commands per device on a normal cadence (default 5 min), switches a device to
+// high-frequency cadence (default 2 min) after any abnormal reading, and returns
+// to normal after HEART_RATE_RECOVERY_NORMAL_READINGS consecutive normal ones.
+// All values are read from the environment at boot (see .env.example).
+const HEART_RATE_NORMAL_INTERVAL_MS = envPositiveInt('HEART_RATE_NORMAL_INTERVAL_MS', 5 * 60 * 1000);
+const HEART_RATE_HIGH_INTERVAL_MS = envPositiveInt('HEART_RATE_HIGH_INTERVAL_MS', 2 * 60 * 1000);
+const HEART_RATE_RECOVERY_NORMAL_READINGS = envPositiveInt('HEART_RATE_RECOVERY_NORMAL_READINGS', 3);
+const HEART_RATE_REQUEST_TIMEOUT_MS = envPositiveInt('HEART_RATE_REQUEST_TIMEOUT_MS', 15000);
+const HEART_RATE_HISTORY_WINDOW = envPositiveInt('HEART_RATE_HISTORY_WINDOW', 200);
+
+const heartRateMonitor = createHeartRateMonitor({
+    normalIntervalMs: HEART_RATE_NORMAL_INTERVAL_MS,
+    highIntervalMs: HEART_RATE_HIGH_INTERVAL_MS,
+    recoveryNormalReadings: HEART_RATE_RECOVERY_NORMAL_READINGS,
+    requestTimeoutMs: HEART_RATE_REQUEST_TIMEOUT_MS,
+    historyWindow: HEART_RATE_HISTORY_WINDOW,
+    alertLow: HEART_RATE_ALERT_LOW,
+    alertHigh: HEART_RATE_ALERT_HIGH
+});
+// The command publisher is injected after publishHeartRateCommand is defined
+// below; until then the engine simply reports publish failure (fail closed).
+heartRateMonitor.setPublishCommand(() => false);
 
 // ── Obstacle deduplication (per-device, in-memory) ──────────────────────
 // A rotating ESP32 radar reports every sweep sample. The same obstacle can
@@ -680,6 +729,35 @@ function handleHeartRateMessage(payload) {
         persistLatestStateBestEffort();
     }
 
+    // Feed the per-device monitoring engine: it classifies this reading,
+    // advances the high-frequency/recovery state machine, and when the reading
+    // carries a requestId that matches this device's pending GET_HEART_RATE it
+    // resolves that pending request (the awaiting route + automatic schedule).
+    // A response misattributed to this device can never resolve because pending
+    // state lives under the responding device's identifier only.
+    const classification = raw < HEART_RATE_ALERT_LOW
+        ? 'LOW'
+        : raw > HEART_RATE_ALERT_HIGH ? 'HIGH' : 'NORMAL';
+    const monitorResult = heartRateMonitor.handleReading({
+        deviceId,
+        heartRate: raw,
+        timestamp,
+        receivedAt,
+        requestId: payload.requestId
+    });
+
+    // Persist to history (all three reading sources) BEFORE the abnormal-event
+    // branch, so normal readings always land in history without ever becoming
+    // alert events or SSE broadcasts.
+    persistHeartRateBestEffort({
+        deviceId,
+        heartRate: raw,
+        classification,
+        readingType: (monitorResult && monitorResult.readingType) || 'CONTINUOUS',
+        requestId: payload.requestId,
+        timestamp
+    });
+
     const abnormal = raw < HEART_RATE_ALERT_LOW || raw > HEART_RATE_ALERT_HIGH;
 
     if (!abnormal) {
@@ -751,6 +829,9 @@ const BUZZER_COMMANDS = Object.freeze({
     BUZZER_OFF: 'BUZZER_OFF'
 });
 
+// Backend → ESP32 command to produce one fresh on-demand heart-rate reading.
+const HEART_RATE_COMMAND = 'GET_HEART_RATE';
+
 function publishBuzzerCommand(command, deviceId) {
     const published = mqttClient.publish(TOPICS.DEVICE_COMMAND, {
         command,
@@ -766,6 +847,21 @@ function publishBuzzerCommand(command, deviceId) {
     }
     return published;
 }
+
+// Publishes a device-targeted GET_HEART_RATE command. deviceId + requestId are
+// carried in the payload so the ESP32 can verify the command targets it and the
+// engine can correlate this device's response by requestId. Returns whether the
+// publish was accepted by the (connected) MQTT client.
+function publishHeartRateCommand(identifier, requestId) {
+    return mqttClient.publish(TOPICS.DEVICE_COMMAND, {
+        command: HEART_RATE_COMMAND,
+        deviceId: identifier,
+        requestId,
+        issuedAt: new Date().toISOString()
+    });
+}
+heartRateMonitor.setPublishCommand(publishHeartRateCommand);
+heartRateMonitor.start();
 
 // Authenticates a request via the session cookie and requires the CARETAKER
 // role. Returns the session on success; on failure it sends the appropriate
@@ -1498,6 +1594,156 @@ app.post('/api/caretaker/simulate-event', requireAuth, requireRole('CARETAKER'),
     }
 });
 
+// ── On-demand heart-rate: caretaker → one device (GET_HEART_RATE) ───────────
+// The caretaker dashboard never addresses the ESP32 directly. These routes are
+// how the SELECTED device of an authorized blind user is asked for a fresh
+// on-demand reading, how its latest reading + monitoring mode are read, and how
+// its device-scoped history is listed. Authorization mirrors the simulate route:
+// an authenticated CARETAKER with an ACTIVE relationship to the device's owner,
+// identity always resolved from the database, never from the client.
+
+async function resolveAuthorizedHeartRateDevice(req, res) {
+    const deviceId = req.params.deviceId;
+    if (!isValidUuid(deviceId)) {
+        res.status(400).json({ error: 'deviceId must be a registered device id' });
+        return null;
+    }
+    const deviceRow = await deviceQueries.getDeviceById(deviceId);
+    if (!deviceRow) {
+        res.status(404).json({ error: 'Device not found' });
+        return null;
+    }
+    const allowed = await hasActiveRelationship(req.auth.user.id, deviceRow.blind_user_id);
+    if (!allowed) {
+        res.status(404).json({ error: 'Device not found' });
+        return null;
+    }
+    return deviceRow;
+}
+
+// POST /api/caretaker/devices/:deviceId/heart-rate-request
+// Issues ONE GET_HEART_RATE to this device and waits for the matching response
+// (deviceId + requestId on the sensor/heart topic). A click that lands while a
+// request is already pending joins it — no second command is ever published.
+app.post('/api/caretaker/devices/:deviceId/heart-rate-request',
+    requireAuth, requireRole('CARETAKER'), caretakerSimLimiter, async (req, res, next) => {
+        let issuedRequestId = null;
+        try {
+            const deviceRow = await resolveAuthorizedHeartRateDevice(req, res);
+            if (!deviceRow) return;
+
+            const result = heartRateMonitor.requestNow(deviceRow.device_identifier, {
+                issuedBy: 'MANUAL',
+                wait: true
+            });
+            issuedRequestId = result.requestId;
+            if (!result.published) {
+                return res.status(503).json({
+                    error: 'MQTT command channel unavailable — heart-rate request not sent to the device.',
+                    mqtt: mqttClient.getState()
+                });
+            }
+
+            // Wait for the device response (the engine also abandons + reschedules
+            // the pending request on its own timeout). The +2s margin lets the
+            // engine's own timeout win and keeps this route self-sufficient even
+            // if the engine ticker is busy.
+            const timeoutMs = HEART_RATE_REQUEST_TIMEOUT_MS + 2000;
+            const reading = await Promise.race([
+                result.promise,
+                new Promise((_resolve, reject) => {
+                    const timer = setTimeout(
+                        () => reject(new Error(heartRateMonitor.HEART_RATE_REQUEST_TIMEOUT_ERROR)),
+                        timeoutMs
+                    );
+                    if (typeof timer.unref === 'function') timer.unref();
+                })
+            ]);
+
+            const state = heartRateMonitor.getState(deviceRow.device_identifier);
+            return res.status(200).json({
+                requestId: result.requestId,
+                pending: Boolean(result.pending),
+                deviceId: deviceRow.device_identifier,
+                deviceUuid: deviceRow.id,
+                reading,
+                monitoringMode: state ? state.monitoringMode : 'NORMAL'
+            });
+        } catch (err) {
+            if (err && err.message === heartRateMonitor.HEART_RATE_REQUEST_TIMEOUT_ERROR) {
+                return res.status(504).json({
+                    error: `Heart-rate request timed out — no fresh reading from the device within ${HEART_RATE_REQUEST_TIMEOUT_MS}ms.`,
+                    requestId: issuedRequestId
+                });
+            }
+            if (err && err.message === heartRateMonitor.HEART_RATE_COMMAND_UNAVAILABLE_ERROR) {
+                return res.status(503).json({
+                    error: 'MQTT command channel unavailable — heart-rate request not sent to the device.',
+                    mqtt: mqttClient.getState()
+                });
+            }
+            return next(err);
+        }
+    });
+
+// GET /api/caretaker/devices/:deviceId/heart-rate
+// Latest reading + monitoring engine state for this device (the dashboard polls
+// this every few seconds). Always 200 once authorized; fields are null until the
+// first reading is observed.
+app.get('/api/caretaker/devices/:deviceId/heart-rate',
+    requireAuth, requireRole('CARETAKER'), caretakerSimLimiter, async (req, res, next) => {
+        try {
+            const deviceRow = await resolveAuthorizedHeartRateDevice(req, res);
+            if (!deviceRow) return;
+            const state = heartRateMonitor.getState(deviceRow.device_identifier);
+            return res.status(200).json({
+                deviceId: deviceRow.device_identifier,
+                deviceUuid: deviceRow.id,
+                heartRate: state && state.lastReading ? state.lastReading.heartRate : null,
+                classification: state && state.lastReading ? state.lastReading.classification : null,
+                timestamp: state && state.lastReading ? state.lastReading.timestamp : null,
+                readingType: state && state.lastReading ? state.lastReading.readingType : null,
+                monitoringMode: state ? state.monitoringMode : 'NORMAL',
+                consecutiveNormalReadings: state ? state.consecutiveNormalReadings : 0,
+                pendingRequestId: state ? state.pendingRequestId : null,
+                nextRequestAt: state ? state.nextRequestAt : null
+            });
+        } catch (err) {
+            return next(err);
+        }
+    });
+
+// GET /api/caretaker/devices/:deviceId/heart-rate/history?limit=
+// Device-scoped reading history, newest-first (default 50, max 200). The DB is
+// the source of truth; the in-memory engine window is the fallback when the
+// database is unavailable (like GET /api/events).
+app.get('/api/caretaker/devices/:deviceId/heart-rate/history',
+    requireAuth, requireRole('CARETAKER'), caretakerSimLimiter, async (req, res, next) => {
+        try {
+            const deviceRow = await resolveAuthorizedHeartRateDevice(req, res);
+            if (!deviceRow) return;
+
+            const rawLimit = parseInt(req.query.limit, 10);
+            const limit = Number.isFinite(rawLimit) && rawLimit > 0 ? Math.min(rawLimit, 200) : 50;
+
+            let readings;
+            try {
+                readings = await queries.listHeartRateHistoryForDevice(deviceRow.device_identifier, limit);
+            } catch (err) {
+                console.warn('[Persistence] Heart-rate history fell back to memory:', err && err.message ? err.message : err);
+                readings = heartRateMonitor.getHistory(deviceRow.device_identifier, limit);
+            }
+
+            return res.status(200).json({
+                deviceId: deviceRow.device_identifier,
+                deviceUuid: deviceRow.id,
+                readings
+            });
+        } catch (err) {
+            return next(err);
+        }
+    });
+
 app.use('/api/auth', authRouter);
 app.use('/api/blind-users', blindUsersRouter);
 app.use('/api/caretaker', careRouter);
@@ -1572,6 +1818,32 @@ async function bootRehydrateFromDatabase() {
 
         await conversationStore.rehydrateFromDb();
 
+        // Restore the per-device heart-rate monitoring engine from persisted
+        // history (adopts devices + resumes each cadence safely). Isolated in
+        // its own try/catch so a database that predates migration 004 (or has a
+        // temporary hiccup) degrades to an empty HR monitor instead of failing
+        // the whole boot.
+        try {
+            const heartRateHistory = await queries.listRecentHeartRateHistory(500);
+            const adopted = heartRateMonitor.rehydrateRows(heartRateHistory);
+            console.log(`[Persistence] Rehydrated ${adopted} device(s) with heart-rate history (${heartRateHistory.length} reading(s)).`);
+        } catch (hrErr) {
+            console.warn('[Persistence] Heart-rate history rehydration unavailable:', hrErr && hrErr.message ? hrErr.message : hrErr);
+        }
+
+        // Adopt every registered device for heart-rate auto-monitoring. Devices
+        // restored from history keep their cadence/mode; the rest get a fresh
+        // normal-cadence schedule. A registered device without a MAX30102 simply
+        // times out its automatic requests and reschedules — never alerts.
+        try {
+            const registeredRows = await deviceQueries.listAllDeviceIdentifiers();
+            for (const row of registeredRows) {
+                heartRateMonitor.registerDevice(row.device_identifier);
+            }
+        } catch (devErr) {
+            console.warn('[Persistence] Heart-rate monitor device adoption unavailable:', devErr && devErr.message ? devErr.message : devErr);
+        }
+
         console.log(`[Persistence] Rehydrated from database: ${recentEvents.length} event(s), latest state, MQTT seq ${maxSeq}.`);
         return true;
     } catch (err) {
@@ -1642,5 +1914,15 @@ module.exports = {
     OBSTACLE_REALERT_COOLDOWN_MS,
     scopeRuntimeStateForDevice,
     EVENT_MESSAGE_MAX,
-    getSseClientCount
+    getSseClientCount,
+    heartRateMonitor,
+    HEART_RATE_COMMAND,
+    HEART_RATE_NORMAL_INTERVAL_MS,
+    HEART_RATE_HIGH_INTERVAL_MS,
+    HEART_RATE_RECOVERY_NORMAL_READINGS,
+    HEART_RATE_REQUEST_TIMEOUT_MS,
+    // Test seam: swaps the MQTT command publisher so an in-process harness can
+    // drive the full request→response path without a broker (see
+    // scripts/test-heart-rate-monitor.js).
+    setHeartRateCommandPublisher: (publishFn) => heartRateMonitor.setPublishCommand(publishFn)
 };

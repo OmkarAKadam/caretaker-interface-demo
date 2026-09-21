@@ -37,6 +37,7 @@
 #define MQTT_TOPIC_RADAR   "blindguardian/sensor/radar"
 #define MQTT_TOPIC_STATUS  "blindguardian/device/status"
 #define MQTT_TOPIC_HEART   "blindguardian/sensor/heart"
+#define MQTT_TOPIC_COMMAND "blindguardian/device/command"
 
 // Device id reported in payloads
 #define DEVICE_ID "BG001"
@@ -62,6 +63,12 @@
 // ============================================
 
 #define OBSTACLE_DISTANCE 100
+
+// Bounded window to wait for a FRESH MAX30102 beat after a GET_HEART_RATE
+// command. Kept to a few heartbeats and well under the backend's request
+// timeout: if the window elapses we publish nothing and let the backend time
+// out — we never fabricate a BPM.
+#define HEART_REQUEST_WAIT_MS 4000
 
 
 // ============================================
@@ -106,6 +113,13 @@ unsigned long ledOffTime = 0;
 volatile bool latestFingerDetected = false;
 volatile byte latestHeartRate = 0;
 volatile bool newHeartReading = false;
+
+// On-demand GET_HEART_RATE request state.
+// Written by the MQTT callback (same core/context as loop()), consumed by the
+// main loop. A bounded wait for a FRESH beat guarantees we never reply with a
+// stale reading and never block radar for long.
+String pendingRequestId = "";
+unsigned long requestExpireAt = 0;
 
 
 // ============================================
@@ -340,6 +354,12 @@ void setup() {
 
   mqttClient.setServer(MQTT_HOST, MQTT_PORT);
 
+  mqttClient.setCallback(mqttCallback);
+
+  // Command payloads (deviceId + requestId + issuedAt) exceed PubSubClient's
+  // default 128-byte buffer, so allocate a larger one before connecting.
+  mqttClient.setBufferSize(512);
+
   // ------------------------------------------
   // CONNECT TO WI-FI (non-blocking for local radar)
   // ------------------------------------------
@@ -489,6 +509,7 @@ bool connectMqtt() {
   if (mqttClient.connect(MQTT_CLIENT_ID, MQTT_USERNAME, MQTT_PASSWORD)) {
 
     Serial.println(" connected.");
+    mqttClient.subscribe(MQTT_TOPIC_COMMAND);  // on-demand GET_HEART_RATE commands
     publishDeviceStatus("ONLINE", "CONNECTED");
 
     return true;
@@ -616,6 +637,172 @@ void publishHeartReading() {
                    ",\"timestamp\":\"" + timestamp + "\"}";
 
   mqttClient.publish(MQTT_TOPIC_HEART, payload.c_str());
+
+}
+
+
+// ============================================
+// ON-DEMAND GET_HEART_RATE COMMAND HANDLER
+// ============================================
+//
+// Subscribed to blindguardian/device/command. The firmware does not use
+// ArduinoJson, so the small flat command payload is parsed with plain String
+// scans. Only GET_HEART_RATE commands addressed to THIS device are accepted;
+// everything else is ignored.
+
+String extractJsonString(const String& json, const char* key) {
+
+  String token = String("\"") + key + "\":\"";
+
+  int start = json.indexOf(token);
+
+  if (start < 0) {
+
+    return "";
+
+  }
+
+  int valueStart = start + token.length();
+
+  int end = json.indexOf('"', valueStart);
+
+  if (end < 0) {
+
+    return "";
+
+  }
+
+  return json.substring(valueStart, end);
+
+}
+
+
+void mqttCallback(char* topic, byte* payload, unsigned int length) {
+
+  if (strcmp(topic, MQTT_TOPIC_COMMAND) != 0) {
+
+    return;
+
+  }
+
+  String message;
+
+  message.reserve(length);
+
+  for (unsigned int i = 0; i < length; i++) {
+
+    message += (char)payload[i];
+
+  }
+
+  String command   = extractJsonString(message, "command");
+  String device    = extractJsonString(message, "deviceId");
+  String requestId = extractJsonString(message, "requestId");
+
+  // Accept ONLY GET_HEART_RATE commands addressed to this device.
+  if (command != "GET_HEART_RATE") {
+
+    return;
+
+  }
+
+  if (device != DEVICE_ID) {
+
+    Serial.println("COMMAND: GET_HEART_RATE for another device ignored");
+
+    return;
+
+  }
+
+  if (requestId.length() == 0) {
+
+    Serial.println("COMMAND: GET_HEART_RATE without requestId ignored");
+
+    return;
+
+  }
+
+  Serial.println("COMMAND: GET_HEART_RATE received — waiting for a fresh beat");
+
+  // Consume any beat that predates the command so the response waits for a
+  // reading that arrives AFTER the request (never stale data).
+  newHeartReading = false;
+
+  pendingRequestId = requestId;
+
+  requestExpireAt = millis() + HEART_REQUEST_WAIT_MS;
+
+}
+
+
+// ============================================
+// PUBLISH HEART-RATE RESPONSE (ON-DEMAND)
+// ============================================
+//
+// Main loop only — never called from the HR sampling task. Echoes the
+// incoming requestId so the backend can correlate the response.
+
+void publishHeartReadingWithRequest(const String& requestId) {
+
+  String timestamp = iso8601Now();
+
+  String payload = String("{\"deviceId\":\"") + DEVICE_ID +
+
+                   "\",\"heartRate\":" + String(latestHeartRate) +
+
+                   ",\"fingerDetected\":" + (latestFingerDetected ? "true" : "false") +
+
+                   ",\"timestamp\":\"" + timestamp +
+
+                   "\",\"requestId\":\"" + requestId + "\"}";
+
+  mqttClient.publish(MQTT_TOPIC_HEART, payload.c_str());
+
+}
+
+
+// ============================================
+// HANDLE PENDING GET_HEART_RATE REQUEST
+// ============================================
+//
+// Waits (bounded) for a FRESH beat from the heart-rate sampling task and
+// publishes exactly ONE response with the echoed requestId. If no finger / no
+// fresh reading arrives within HEART_REQUEST_WAIT_MS, nothing is published —
+// no fabricated BPM — and the backend times out instead of trusting fake data.
+
+void handlePendingHeartRequest() {
+
+  if (pendingRequestId.length() == 0) {
+
+    return;
+
+  }
+
+  unsigned long deadline = requestExpireAt;
+
+  while (millis() < deadline) {
+
+    if (newHeartReading && latestFingerDetected) {
+
+      publishHeartReadingWithRequest(pendingRequestId);
+
+      newHeartReading = false;
+
+      pendingRequestId = "";
+
+      Serial.println("COMMAND: GET_HEART_RATE response published (fresh reading)");
+
+      return;
+
+    }
+
+    delay(20);
+
+  }
+
+  pendingRequestId = "";
+
+  Serial.println("COMMAND: GET_HEART_RATE — no fresh reading, NO response published (backend will time out)");
 
 }
 
@@ -894,6 +1081,18 @@ void loop() {
   // radar scan. Returns immediately when disconnected.
 
   maintainMqtt();
+
+
+  // ==========================================
+  // HANDLE ON-DEMAND GET_HEART_RATE REQUEST (MQTT, best effort)
+  // ==========================================
+  //
+  // Publishes ONE response with the echoed requestId once a fresh beat is
+  // available, or silently times out (publishing nothing) if no finger / no
+  // fresh reading arrives. Runs before the continuous publisher so the
+  // response beat is never double-published.
+
+  handlePendingHeartRequest();
 
 
   // ==========================================
