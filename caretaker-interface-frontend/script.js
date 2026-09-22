@@ -1178,11 +1178,6 @@ let heartRateRequestPending = false;
 // the existing event-driven rendering.
 let deviceHeartRateSource = null; // { bpm, classification, timestamp }
 
-function heartRateDeviceRowVisible() {
-    const row = document.getElementById('deviceHrMonRow');
-    return !!(row && getComputedStyle(row).display !== 'none');
-}
-
 function heartRateClassification(reading) {
     const value = reading && reading.classification;
     if (value === 'NORMAL' || value === 'HIGH' || value === 'LOW') return value;
@@ -1194,26 +1189,23 @@ function heartRateClassification(reading) {
 }
 
 function renderHeartRateState(state) {
-    const monValue = document.getElementById('deviceHrMonValue');
     const hrValue = document.getElementById('deviceHrValue');
-    if (!monValue) return;
+    if (!hrValue) return;
 
-    const reading = state && state.lastReading;
+    // Backend GET .../heart-rate returns a FLAT per-device state:
+    //   { deviceId, heartRate, classification, timestamp, readingType, … }
+    // There is no nested `lastReading` wrapper — support both anyway.
+    const reading = state && (state.lastReading || state);
     const bpm = reading && reading.heartRate != null ? reading.heartRate : null;
-    const mode = (state && state.monitoringMode) || 'NORMAL';
     const classification = bpm === null ? null : heartRateClassification(reading);
 
     const dotClass = classification === null
         ? 'off'
         : (classification === 'NORMAL' ? 'ok' : 'warn');
-    const modeLabel = bpm === null ? 'NO READING' : mode;
 
-    monValue.innerHTML = `<span class="row-dot ${dotClass}"></span>${modeLabel}`;
-    if (hrValue) {
-        hrValue.innerHTML = bpm === null
-            ? '<span class="row-dot acid"></span>—'
-            : `<span class="row-dot ${dotClass}"></span>${bpm} BPM`;
-    }
+    hrValue.innerHTML = bpm === null
+        ? '<span class="row-dot acid"></span>—'
+        : `<span class="row-dot ${dotClass}"></span>${bpm} BPM`;
 }
 
 function renderHeartRateHistory(readings) {
@@ -1288,7 +1280,7 @@ async function refreshHeartRateForSelectedDevice() {
         // card. state.lastReading is only a fallback when the history has no
         // valid latest reading (never allowed to overwrite a newer history one,
         // because the history-derived source is set only when preferred).
-        const source = historyReading || (state && state.lastReading);
+        const source = historyReading || (state && (state.lastReading || state));
         if (source && typeof source.heartRate === 'number' && isFinite(source.heartRate)) {
             deviceHeartRateSource = {
                 bpm: source.heartRate,
@@ -2674,7 +2666,6 @@ function renderDeviceCard() {
     const stateEl = document.getElementById('deviceCardState');
     const signalEl = document.getElementById('deviceCardSignal');
     const locationEl = document.getElementById('deviceCardLocation');
-    const firmwareEl = document.getElementById('deviceCardFirmware');
     const noteEl = document.getElementById('deviceNote');
     const footEl = document.getElementById('sidebarFootDevice');
     const monitorEl = document.getElementById('headerMonitoring');
@@ -2691,7 +2682,6 @@ function renderDeviceCard() {
         if (idEl) idEl.textContent = '—';
         if (signalEl) signalEl.innerHTML = '<span class="row-dot acid"></span>—';
         if (locationEl) locationEl.innerHTML = '<span class="row-dot acid"></span>—';
-        if (firmwareEl) firmwareEl.innerHTML = '<span class="row-dot acid"></span>—';
         if (noteEl) noteEl.textContent = 'No cap device registered for this monitored user yet — register one from the Devices section.';
         if (footEl) footEl.textContent = 'No device linked';
         if (monitorEl) {
@@ -2710,7 +2700,6 @@ function renderDeviceCard() {
     if (idEl) idEl.textContent = device.deviceIdentifier;
     if (signalEl) signalEl.innerHTML = `<span class="row-dot ${dotClass}"></span>${status} · Last seen ${lastSeenLabel(device.lastSeenAt)}`;
     if (locationEl) locationEl.innerHTML = `<span class="row-dot ${dotClass}"></span>Blind person's phone GPS`;
-    if (firmwareEl) firmwareEl.innerHTML = '<span class="row-dot acid"></span>—';
     if (noteEl) noteEl.textContent = `Registered cap ${device.deviceIdentifier} for this monitored user. Pair the blind person's phone with the device token to start sending readings.`;
     if (footEl) footEl.textContent = `DEVICE ${device.deviceIdentifier} · ${status}`;
     if (monitorEl) {
