@@ -16,9 +16,9 @@ const OBSTACLE_TRIGGER = 'OBSTACLE';
 //   very close <= 50       → warning
 //   close      51..90      → slow down
 //   moderate   91..150     → plain alert
-const OBSTACLE_VERY_CLOSE_MAX_CM = 50;
-const OBSTACLE_CLOSE_MAX_CM = 90;
-const OBSTACLE_MODERATE_MAX_CM = 150;
+const OBSTACLE_VERY_CLOSE_MAX_CM = 100;
+const OBSTACLE_CLOSE_MAX_CM = 150;
+const OBSTACLE_MODERATE_MAX_CM = 200;
 
 // A client-side safety net against TTS spam (belt-and-braces on top of the
 // backend's per-band dedup + realert cooldown).
