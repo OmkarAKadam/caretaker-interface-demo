@@ -320,21 +320,22 @@
                                 POST /api/events → backend → SSE → client → speech.
                             </p>
                             <div class="obstacle-panel">
-                                <button class="obstacle-btn left" type="button" data-direction="LEFT">
-                                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4"><path d="m15 18-6-6 6-6"></path></svg>
-                                    Left
-                                </button>
-                                <button class="obstacle-btn center" type="button" data-direction="CENTER">
+                                <button class="obstacle-btn obstacle" type="button" data-distance="140">
                                     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4"><path d="M12 5v14M5 12h14"></path></svg>
-                                    Ahead
+                                    140 cm
                                 </button>
-                                <button class="obstacle-btn right" type="button" data-direction="RIGHT">
-                                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4"><path d="m9 18 6-6-6-6"></path></svg>
-                                    Right
+                                <button class="obstacle-btn obstacle" type="button" data-distance="80">
+                                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4"><path d="M12 5v14M5 12h14"></path></svg>
+                                    80 cm
+                                </button>
+                                <button class="obstacle-btn obstacle" type="button" data-distance="40">
+                                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4"><path d="M12 5v14M5 12h14"></path></svg>
+                                    40 cm
                                 </button>
                             </div>
                             <p class="demo-note">
-                                Creates an OBSTACLE_&lt;direction&gt; event through REST.
+                                Creates an OBSTACLE event through REST with the chosen
+                                distance (140 moderate, 80 slow-down, 40 warning).
                                 Enable voice alerts first so the client speaks the result.
                             </p>
                             <div class="demo-feedback" id="demoFeedback" aria-live="polite"></div>

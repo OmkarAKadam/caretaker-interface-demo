@@ -6,12 +6,10 @@ const HEART_RATE_FRESHNESS_MS = 2 * 60 * 1000;
 const OBSTACLE_FRESHNESS_MS = 30 * 1000;
 const FALL_FRESHNESS_MS = 10 * 60 * 1000;
 
-const OBSTACLE_TRIGGERS = new Set(['OBSTACLE_LEFT', 'OBSTACLE_CENTER', 'OBSTACLE_RIGHT']);
+const OBSTACLE_TRIGGERS = new Set(['OBSTACLE']);
 
 const DIRECTION_LABEL = {
-    OBSTACLE_LEFT: 'LEFT',
-    OBSTACLE_CENTER: 'CENTER',
-    OBSTACLE_RIGHT: 'RIGHT'
+    OBSTACLE: 'ahead'
 };
 
 const EMERGENCY_TRIGGERS = new Set(['SOS', 'SOS_AND_HEART_RATE']);
@@ -106,19 +104,19 @@ function buildTrustedContext(state) {
             const age = ageSeconds(event.timestamp);
             if (age === null || age > obstacleMaxAgeSec) return;
 
-            const direction = DIRECTION_LABEL[event.trigger] || event.trigger;
+            const label = DIRECTION_LABEL[event.trigger] || 'ahead';
 
             if (typeof event.distance === 'number') {
                 const distanceM = (event.distance / 100).toFixed(1);
                 recentObstacles.push({
-                    direction: direction,
+                    label: label,
                     distanceM: distanceM,
                     hasDistance: true,
                     age: age
                 });
             } else {
                 recentObstacles.push({
-                    direction: direction,
+                    label: label,
                     hasDistance: false,
                     age: age
                 });
@@ -136,9 +134,9 @@ function buildTrustedContext(state) {
                 const ageStr = formatAge(o.age);
                 const agePart = ageStr ? ' (' + ageStr + ')' : '';
                 if (o.hasDistance) {
-                    return o.direction + ' ' + o.distanceM + 'm' + agePart;
+                    return o.label + ' ' + o.distanceM + 'm' + agePart;
                 }
-                return o.direction + ' (distance unavailable)' + agePart;
+                return o.label + ' (distance unavailable)' + agePart;
             });
             lines.push('Recent obstacles: ' + parts.join(', '));
         }

@@ -9,17 +9,49 @@ const HEALTH_ENDPOINT = `${API_BASE_URL}/api/health`;
 const BG_DEVICE_ID_KEY = 'bg_device_id';
 const BG_DEVICE_TOKEN_KEY = 'bg_device_token';
 
-const DIRECTION_PHRASES = {
-    OBSTACLE_LEFT: 'Obstacle on your left',
-    OBSTACLE_CENTER: 'Obstacle ahead',
-    OBSTACLE_RIGHT: 'Obstacle on your right'
-};
+const OBSTACLE_TRIGGER = 'OBSTACLE';
 
-const DIRECTION_LABELS = {
-    OBSTACLE_LEFT: 'Left',
-    OBSTACLE_CENTER: 'Center',
-    OBSTACLE_RIGHT: 'Right'
-};
+// Obstacle severity tiers (cm) — parity with the backend bands:
+//   safe       > 150       → no event ever reaches the client
+//   very close <= 50       → warning
+//   close      51..90      → slow down
+//   moderate   91..150     → plain alert
+const OBSTACLE_VERY_CLOSE_MAX_CM = 50;
+const OBSTACLE_CLOSE_MAX_CM = 90;
+const OBSTACLE_MODERATE_MAX_CM = 150;
+
+// A client-side safety net against TTS spam (belt-and-braces on top of the
+// backend's per-band dedup + realert cooldown).
+const OBSTACLE_SPEECH_COOLDOWN_MS = 4000;
+// Never speak an obstacle whose device timestamp is older than this — stale
+// data must not interrupt the user.
+const OBSTACLE_FRESHNESS_MS = 60000;
+
+function obstaclePhrase(event) {
+    const distance = event.distance;
+    if (typeof distance === 'number' && Number.isFinite(distance)) {
+        const cm = Math.round(distance);
+        if (distance <= OBSTACLE_VERY_CLOSE_MAX_CM) {
+            return `Warning! Obstacle very close, ${cm} centimeters ahead.`;
+        }
+        if (distance <= OBSTACLE_CLOSE_MAX_CM) {
+            return `Obstacle ahead at ${cm} centimeters. Please slow down.`;
+        }
+        if (distance <= OBSTACLE_MODERATE_MAX_CM) {
+            return `Obstacle ahead at ${cm} centimeters.`;
+        }
+        return 'Obstacle ahead.';
+    }
+    return 'Obstacle ahead.';
+}
+
+function obstacleLabel(event) {
+    const distance = event.distance;
+    if (typeof distance === 'number' && Number.isFinite(distance)) {
+        return `${Math.round(distance)} cm`;
+    }
+    return 'Ahead';
+}
 
 const MOVE_STEP = 0.0005;
 const MAX_SEEN_IDS = 50;
@@ -54,6 +86,7 @@ let passiveRestartCount = 0;
 let passiveRestartTimer = null;
 let buzzerState = null;
 let isSpeaking = false;
+let lastObstacleSpeechAt = 0;
 let recognitionRestartTimer = null;
 let recognitionRestartCount = 0;
 let sosReturnFallbackTimer = null;
@@ -412,7 +445,7 @@ function updateLastAlert(phrase, label) {
     directionChip.textContent = label;
     directionChip.hidden = false;
     directionChip.classList.remove('left', 'center', 'right');
-    directionChip.classList.add(label.toLowerCase());
+    directionChip.classList.add('obstacle');
 }
 
 function handleEventData(data) {
@@ -425,21 +458,30 @@ function handleEventData(data) {
     if (!event || typeof event !== 'object' || !event.alertId) {
         return;
     }
-    const phrase = DIRECTION_PHRASES[event.trigger];
-    if (!phrase) {
+    if (event.trigger !== OBSTACLE_TRIGGER) {
         return;
     }
     if (markSeen(event.alertId)) {
         return;
     }
+    // Never act on stale device timestamps (clock drift, delayed delivery).
+    const occurredAt = Date.parse(event.timestamp);
+    if (!Number.isNaN(occurredAt) && (Date.now() - occurredAt) > OBSTACLE_FRESHNESS_MS) {
+        return;
+    }
     if (isInEmergencyConversation()) {
         return;
     }
-    const label = DIRECTION_LABELS[event.trigger] || event.trigger;
+    const phrase = obstaclePhrase(event);
+    const label = obstacleLabel(event);
     updateLastAlert(phrase, label);
     if (walleState === 'SPEAKING') {
         return;
     }
+    if (Date.now() - lastObstacleSpeechAt < OBSTACLE_SPEECH_COOLDOWN_MS) {
+        return;
+    }
+    lastObstacleSpeechAt = Date.now();
     speak(phrase);
 }
 
@@ -2000,17 +2042,23 @@ function toggleDemo() {
     document.getElementById('demoToggleLabel').classList.toggle('on', open);
 }
 
-async function sendDemoEvent(direction) {
-    const trigger = `OBSTACLE_${direction}`;
+async function sendDemoEvent(distance) {
+    const value = parseFloat(distance);
+    if (!Number.isFinite(value) || value < 0 || value > 400) {
+        demoFeedback.textContent = `Invalid obstacle distance: “${distance}”.`;
+        demoFeedback.classList.add('bad');
+        return;
+    }
     const alertId = `OBSTACLE-DEMO-${Date.now()}-${Math.floor(Math.random() * 1000)}`;
     const payload = {
         alertId,
-        trigger,
+        trigger: OBSTACLE_TRIGGER,
         status: 'ACTIVE',
         heartRate: null,
         latitude: PHONE_COORDS.latitude,
         longitude: PHONE_COORDS.longitude,
-        timestamp: new Date().toISOString()
+        timestamp: new Date().toISOString(),
+        distance: value
     };
 
     demoFeedback.textContent = 'Sending event…';
@@ -2030,7 +2078,7 @@ async function sendDemoEvent(direction) {
             throw new Error(`HTTP ${response.status}`);
         }
         const created = await response.json();
-        demoFeedback.textContent = `${created.trigger} sent — check voice output above.`;
+        demoFeedback.textContent = `${created.trigger} sent (${created.distance} cm) — check voice output above.`;
         demoFeedback.classList.add('ok');
     } catch (error) {
         demoFeedback.textContent = `Failed to send event: ${error.message || error}`;
@@ -2111,7 +2159,7 @@ moveButtons.south.addEventListener('click', () => applyMovement(-MOVE_STEP, 0));
 moveButtons.east.addEventListener('click', () => applyMovement(0, MOVE_STEP));
 moveButtons.west.addEventListener('click', () => applyMovement(0, -MOVE_STEP));
 obstacleButtons.forEach((btn) => {
-    btn.addEventListener('click', () => sendDemoEvent(btn.getAttribute('data-direction')));
+    btn.addEventListener('click', () => sendDemoEvent(btn.getAttribute('data-distance')));
 });
 heartRateButtons.forEach((btn) => {
     btn.addEventListener('click', () => sendHeartRateDemo(btn.getAttribute('data-heartrate')));

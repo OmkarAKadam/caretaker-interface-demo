@@ -1,14 +1,14 @@
 // ============================================
-// STEP 9: INTELLIGENT RADAR + DIRECTION + BUZZER
-// ESP32 + SG90 + HC-SR04 + Buzzer
+// STEP 9: INTELLIGENT FORWARD RADAR + BUZZER
+// ESP32 + HC-SR04 + Buzzer
 // ============================================
 //
 // B-MQTT-3: Added Wi-Fi + secure MQTT publishing (PubSubClient + WiFiClientSecure).
-// The existing local radar / servo / distance / direction / buzzer behavior is
-// preserved verbatim. MQTT publish failures must never stop local obstacle detection.
+// The cap has a single fixed forward-facing obstacle sensor (no servo panning,
+// no left/right scanning): every radar reading is treated as an obstacle AHEAD.
+// MQTT publish failures must never stop local obstacle detection.
 
 #include <Wire.h>
-#include <ESP32Servo.h>
 #include <WiFi.h>
 #include <WiFiClientSecure.h>
 #include <PubSubClient.h>
@@ -49,7 +49,6 @@
 
 #define TRIG_PIN 5
 #define ECHO_PIN 18
-#define SERVO_PIN 13
 #define BUZZER_PIN 19
 
 // MAX30102 heart-rate sensor
@@ -62,7 +61,9 @@
 // SETTINGS
 // ============================================
 
-#define OBSTACLE_DISTANCE 100
+// Distance threshold (cm) below which the cap reports an obstacle. Readings
+// above this (or a no-echo reading) are CLEAR: no event, no spoken alert.
+#define OBSTACLE_DISTANCE 150
 
 // Bounded window to wait for a FRESH MAX30102 beat after a GET_HEART_RATE
 // command. Kept to a few heartbeats and well under the backend's request
@@ -74,8 +75,6 @@
 // ============================================
 // OBJECTS AND VARIABLES
 // ============================================
-
-Servo radarServo;
 
 long duration;
 float distance;
@@ -251,7 +250,7 @@ void monitorHeartRate() {
 // ============================================
 
 // FreeRTOS task that samples the MAX30102 ~every 20 ms.
-// The main loop is blocked by radar/servo/buzzer/pulseIn(), so the
+// The main loop is blocked by radar/buzzer/pulseIn(), so the
 // heart sensor runs on its own task to avoid missing beats.
 // No WiFi / MQTT / PubSubClient access from this task.
 
@@ -292,10 +291,6 @@ void setup() {
   pinMode(BUZZER_PIN, OUTPUT);
 
   digitalWrite(BUZZER_PIN, LOW);
-
-// Servo
-
-  radarServo.attach(SERVO_PIN);
 
 
   // ------------------------------------------
@@ -439,47 +434,35 @@ String iso8601Now() {
 // GET DANGER LEVEL FUNCTION
 // ============================================
 //
-// Derives a `danger` value from the existing thresholds used
-// for printing in processReading(). There was no previous
-// stored `danger` classification in the firmware, so this is
-// the new field required by the radar MQTT payload.
+// Informational `danger` label for the radar MQTT payload. Mirrors the
+// severity tiers used by the backend / blind client:
 //
-//   distance < 20  -> CRITICAL
-//   distance < 50  -> HIGH
-//   distance <= OBSTACLE_DISTANCE -> MEDIUM
-//   else           -> LOW
+//   distance < 0  or > OBSTACLE_DISTANCE -> LOW (clear)
+//   distance 91..150                     -> MEDIUM
+//   distance 51..90                      -> HIGH
+//   distance <= 50                       -> CRITICAL
 
 String getDanger(float distance) {
 
-  if (distance == -1) {
+  if (distance < 0 || distance > OBSTACLE_DISTANCE) {
 
     return "LOW";
 
   }
 
-  else if (distance < 20) {
+  if (distance <= 50) {
 
     return "CRITICAL";
 
   }
 
-  else if (distance < 50) {
+  if (distance <= 90) {
 
     return "HIGH";
 
   }
 
-  else if (distance <= OBSTACLE_DISTANCE) {
-
-    return "MEDIUM";
-
-  }
-
-  else {
-
-    return "LOW";
-
-  }
+  return "MEDIUM";
 
 }
 
@@ -580,8 +563,11 @@ void publishDeviceStatus(const char* status, const char* wifiState) {
 // ============================================
 // PUBLISH RADAR READING FUNCTION
 // ============================================
+//
+// Single forward-looking radar: no angle, no direction. The backend treats any
+// in-range reading as an obstacle AHEAD.
 
-void publishRadarReading(int angle, float readingDistance, String direction) {
+void publishRadarReading(float readingDistance) {
 
   if (!mqttClient.connected()) {
 
@@ -595,9 +581,7 @@ void publishRadarReading(int angle, float readingDistance, String direction) {
 
   String payload = String("{\"deviceId\":\"") + DEVICE_ID +
                    "\",\"distance\":" + String(readingDistance, 1) +
-                   ",\"angle\":" + String(angle) +
-                   ",\"direction\":\"" + direction +
-                   "\",\"danger\":\"" + getDanger(readingDistance) +
+                   ",\"danger\":\"" + getDanger(readingDistance) +
                    "\",\"timestamp\":\"" + timestamp + "\"}";
 
   mqttClient.publish(MQTT_TOPIC_RADAR, payload.c_str());
@@ -853,33 +837,6 @@ float measureDistance() {
 
 
 // ============================================
-// GET DIRECTION FUNCTION
-// ============================================
-
-String getDirection(int angle) {
-
-  if (angle >= 20 && angle <= 60) {
-
-    return "LEFT";
-
-  }
-
-  else if (angle >= 61 && angle <= 120) {
-
-    return "CENTER";
-
-  }
-
-  else {
-
-    return "RIGHT";
-
-  }
-
-}
-
-
-// ============================================
 // BUZZER ALERT FUNCTION
 // ============================================
 
@@ -890,7 +847,7 @@ void buzzerAlert(float distance) {
   // OUT OF RANGE OR CLEAR
   // ------------------------------------------
 
-  if (distance == -1 || distance > 200) {
+  if (distance == -1 || distance > OBSTACLE_DISTANCE) {
 
     digitalWrite(BUZZER_PIN, LOW);
 
@@ -898,11 +855,11 @@ void buzzerAlert(float distance) {
 
 
   // ------------------------------------------
-  // 50 - 100 CM
+  // 50 - 150 CM
   // SLOW BEEP
   // ------------------------------------------
 
-  else if (distance >= 100 && distance <= 200) {
+  else if (distance >= 50 && distance <= OBSTACLE_DISTANCE) {
 
     digitalWrite(BUZZER_PIN, HIGH);
     delay(150);
@@ -914,11 +871,11 @@ void buzzerAlert(float distance) {
 
 
   // ------------------------------------------
-  // 20 - 49 CM
+  // 30 - 49 CM
   // FAST BEEP
   // ------------------------------------------
 
-  else if (distance >= 30 && distance < 100) {
+  else if (distance >= 30) {
 
     digitalWrite(BUZZER_PIN, HIGH);
     delay(120);
@@ -930,11 +887,11 @@ void buzzerAlert(float distance) {
 
 
   // ------------------------------------------
-  // BELOW 20 CM
+  // BELOW 30 CM
   // CONTINUOUS BEEP
   // ------------------------------------------
 
-  else if (distance < 30) {
+  else {
 
     digitalWrite(BUZZER_PIN, HIGH);
     delay(400);
@@ -949,18 +906,10 @@ void buzzerAlert(float distance) {
 // ============================================
 // PROCESS RADAR READING
 // ============================================
+//
+// Single fixed forward reading: measure, print, buzz, publish.
 
-void processReading(int angle) {
-
-
-  // Move servo
-
-  radarServo.write(angle);
-
-
-  // Wait for servo to reach position
-
-  delay(400);
+void processReading() {
 
 
   // Measure distance
@@ -968,25 +917,11 @@ void processReading(int angle) {
   distance = measureDistance();
 
 
-  // Get direction
-
-  String direction = getDirection(angle);
-
-
   // ------------------------------------------
   // DISPLAY SCAN INFORMATION
   // ------------------------------------------
 
   Serial.println("--------------------------------------");
-
-
-  Serial.print("Angle: ");
-  Serial.print(angle);
-  Serial.println(" degrees");
-
-
-  Serial.print("Direction: ");
-  Serial.println(direction);
 
 
   // ------------------------------------------
@@ -1017,13 +952,7 @@ void processReading(int angle) {
       Serial.println("STATUS: OBSTACLE DETECTED!");
 
 
-      if (distance < 20) {
-
-        Serial.println("WARNING: CRITICAL DANGER!");
-
-      }
-
-      else if (distance < 50) {
+      if (distance < 50) {
 
         Serial.println("WARNING: CLOSE DANGER!");
 
@@ -1061,7 +990,7 @@ void processReading(int angle) {
   // complete. If MQTT is disconnected this is a no-op, so local
   // obstacle detection is never blocked by the cloud.
 
-  publishRadarReading(angle, distance, direction);
+  publishRadarReading(distance);
 
 }
 
@@ -1103,24 +1032,14 @@ void loop() {
 
 
   // ==========================================
-  // LEFT TO RIGHT SCAN
+  // FORWARD RADAR READING
   // ==========================================
+  //
+  // No servo panning: a single fixed forward reading per cycle, paced by a
+  // short delay so the main loop never hammers the sensor or the MQTT client.
 
-  for (int angle = 20; angle <= 160; angle += 20) {
+  processReading();
 
-    processReading(angle);
-
-  }
-
-
-  // ==========================================
-  // RIGHT TO LEFT SCAN
-  // ==========================================
-
-  for (int angle = 160; angle >= 20; angle -= 20) {
-
-    processReading(angle);
-
-  }
+  delay(250);
 
 }

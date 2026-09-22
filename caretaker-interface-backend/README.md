@@ -237,7 +237,7 @@ messages into the **existing backend processing flow** (no separate alert system
 
 | Topic | Behavior |
 |-------|----------|
-| `blindguardian/sensor/radar` | `direction` `LEFT`/`CENTER`/`RIGHT` → `OBSTACLE_LEFT`/`OBSTACLE_CENTER`/`OBSTACLE_RIGHT` event |
+| `blindguardian/sensor/radar` | Single forward-looking ultrasonic reading `{deviceId, distance, danger, timestamp}`; 2 consecutive in-range (`<= 150 cm`) same-band readings → one `OBSTACLE` event |
 | `blindguardian/emergency/sos` | → `SOS` event |
 | `blindguardian/mobile/location` | Updates the same latest location used by `POST /api/location` |
 | `blindguardian/device/status` | Tracks latest device status in memory (exposed as `deviceStatus` on `/api/health`) |
@@ -258,6 +258,7 @@ MQTT payloads are logged and ignored without crashing or affecting REST.
 
 ## Hardware note
 
-The ESP32 firmware (`smooth-assist.ino`) is managed separately and is **not** included in
-this repository. This backend only exposes the HTTP API that the firmware and the caretaker
-frontend use.
+The ESP32 firmware lives in this repository at `esp/esp.ino` (servo-free: a single fixed
+forward-facing HC-SR04, buzzer, MAX30102 heart-rate sensor, MQTT publishing). This backend
+exposes the HTTP API that the firmware and the caretaker frontend use, and ingests the
+firmware's MQTT telemetry.

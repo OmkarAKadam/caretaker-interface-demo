@@ -641,6 +641,7 @@ body {
 }
 .direction-chip.left, .direction-chip.right { background: var(--emergency-soft); border-color: #f0cfc6; color: var(--emergency-strong); }
 .direction-chip.center { background: var(--warn-soft); border-color: #ecd9b6; color: #8a6a2f; }
+.direction-chip.obstacle { background: var(--warn-soft); border-color: #ecd9b6; color: #8a6a2f; }
 
 .last-alert-text {
     font-size: 1.05rem;
@@ -933,9 +934,7 @@ body {
 .obstacle-btn svg { width: 16px; height: 16px; }
 .obstacle-btn:hover { border-color: var(--brand); color: var(--brand-ink); background: var(--brand-soft); transform: translateY(-1px); }
 .obstacle-btn:focus-visible { outline: 2px solid var(--brand); outline-offset: 2px; }
-.obstacle-btn.left:hover { border-color: var(--emergency); color: var(--emergency-strong); background: var(--emergency-soft); }
-.obstacle-btn.right:hover { border-color: var(--emergency); color: var(--emergency-strong); background: var(--emergency-soft); }
-.obstacle-btn.center:hover { border-color: var(--warn); color: #8a6a2f; background: var(--warn-soft); }
+.obstacle-btn.obstacle:hover { border-color: var(--warn); color: #8a6a2f; background: var(--warn-soft); }
 
 .heartrate-btn {
     display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 0.35rem;

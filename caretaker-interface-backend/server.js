@@ -254,7 +254,7 @@ const sseClients = new Set();
 // high-frequency cadence (default 2 min) after any abnormal reading, and returns
 // to normal after HEART_RATE_RECOVERY_NORMAL_READINGS consecutive normal ones.
 // All values are read from the environment at boot (see .env.example).
-const HEART_RATE_NORMAL_INTERVAL_MS = envPositiveInt('HEART_RATE_NORMAL_INTERVAL_MS', 5 * 60 * 1000);
+const HEART_RATE_NORMAL_INTERVAL_MS = envPositiveInt('HEART_RATE_NORMAL_INTERVAL_MS', 2 * 60 * 1000);
 const HEART_RATE_HIGH_INTERVAL_MS = envPositiveInt('HEART_RATE_HIGH_INTERVAL_MS', 2 * 60 * 1000);
 const HEART_RATE_RECOVERY_NORMAL_READINGS = envPositiveInt('HEART_RATE_RECOVERY_NORMAL_READINGS', 3);
 const HEART_RATE_REQUEST_TIMEOUT_MS = envPositiveInt('HEART_RATE_REQUEST_TIMEOUT_MS', 15000);
@@ -274,22 +274,37 @@ const heartRateMonitor = createHeartRateMonitor({
 heartRateMonitor.setPublishCommand(() => false);
 
 // ── Obstacle deduplication (per-device, in-memory) ──────────────────────
-// A rotating ESP32 radar reports every sweep sample. The same obstacle can
-// therefore appear in many consecutive readings (LEFT, LEFT, LEFT, ...) which
-// previously produced one event — and one Blind Client voice interjection —
-// per reading. State is kept per device identifier (mirroring the heart-rate
-// pattern above) and suppresses repeats while an obstacle stays active.
+// The cap has a single fixed forward-facing ultrasonic sensor (no servo
+// panning, no left/right scanning) and publishes a radar reading per cycle
+// (~1-2/s). The same obstacle can therefore appear in many consecutive
+// readings which previously produced one event — and one Blind Client voice
+// interjection — per reading. State is kept per device identifier (mirroring
+// the heart-rate pattern above) and suppresses repeats while an obstacle stays
+// active within the same severity band.
 //
-// Threshold parity with ESP32 firmware: only readings <= 100 cm are
-// obstacles; a no-echo reading (-1) or anything beyond the threshold is CLEAR
-// and resets the device's state so a later detection alerts again.
-const OBSTACLE_DISTANCE_CM = 100;
+// Severity bands (parity with the firmware buzzer and the Blind Client TTS):
+//   very close  <= 50 cm
+//   close       51..90 cm
+//   moderate    91..150 cm
+//   clear       < 0 or > 150 cm  (no-echo or out-of-range — no event)
+//
+// A band change (e.g. moderate → close while the user approaches) is a NEW
+// confirmed detection, so the client re-alerts with the new distance.
+const OBSTACLE_SAFE_MAX_CM = 150;
+const OBSTACLE_VERY_CLOSE_MAX_CM = 50;
+const OBSTACLE_CLOSE_MAX_CM = 90;
 const OBSTACLE_REQUIRED_CONSECUTIVE = 2;
-// Backstop against rapid sensor-sector flapping (e.g. an obstacle straddling
-// the LEFT/CENTER angle boundary). If a new obstacle direction is confirmed
-// within this window the alert is deferred until the window has passed.
+// Backstop against rapid band flapping (an obstacle straddling a band
+// boundary). If a new obstacle band is confirmed within this window the alert
+// is deferred until the window has passed.
 const OBSTACLE_REALERT_COOLDOWN_MS = envPositiveInt('OBSTACLE_REALERT_COOLDOWN_MS', 3000);
 const obstacleStateByDevice = new Map();
+
+function obstacleBand(distance) {
+    if (distance <= OBSTACLE_VERY_CLOSE_MAX_CM) return 'VERY_CLOSE';
+    if (distance <= OBSTACLE_CLOSE_MAX_CM) return 'CLOSE';
+    return 'MODERATE';
+}
 
 // Stage 8B: cap on concurrent SSE connections per instance. Bounds memory and
 // the abuse surface while keeping the normal demo consoles connected.
@@ -322,7 +337,7 @@ const deviceEventsLimiter = deviceRateLimit(DEVICE_EVENTS_RATE_MAX);
 const deviceLocationLimiter = deviceRateLimit(DEVICE_LOCATION_RATE_MAX);
 const deviceBuzzerLimiter = deviceRateLimit(DEVICE_BUZZER_RATE_MAX);
 
-const VALID_TRIGGERS = ['SOS', 'HEART_RATE', 'SOS_AND_HEART_RATE', 'NORMAL', 'OBSTACLE_LEFT', 'OBSTACLE_CENTER', 'OBSTACLE_RIGHT'];
+const VALID_TRIGGERS = ['SOS', 'HEART_RATE', 'SOS_AND_HEART_RATE', 'NORMAL', 'OBSTACLE'];
 const VALID_STATUSES = ['NORMAL', 'ACTIVE', 'ACKNOWLEDGED', 'RESOLVED'];
 
 // Maximum length of an event message (Stage 8A). Applies to REST and MQTT paths
@@ -488,20 +503,14 @@ function createEvent(event, options) {
     return { ok: true, status: 201, event };
 }
 
-const RADAR_DIRECTION_MAP = {
-    LEFT: 'OBSTACLE_LEFT',
-    CENTER: 'OBSTACLE_CENTER',
-    RIGHT: 'OBSTACLE_RIGHT'
-};
+const OBSTACLE_TRIGGER = 'OBSTACLE';
 
 function handleRadarMessage(payload) {
-    const direction = payload && payload.direction;
-    const trigger = RADAR_DIRECTION_MAP[direction];
     const hasDistance =
         payload && typeof payload.distance === 'number' && Number.isFinite(payload.distance);
 
-    if (!trigger || !hasDistance) {
-        console.warn(`[MQTT] Invalid radar payload — direction="${String(direction)}", distance=${payload ? payload.distance : 'missing'}`);
+    if (!hasDistance) {
+        console.warn(`[MQTT] Invalid radar payload — distance=${payload ? payload.distance : 'missing'}`);
         return;
     }
 
@@ -511,13 +520,13 @@ function handleRadarMessage(payload) {
             : 'unknown';
 
     let state = obstacleStateByDevice.get(deviceId) ||
-        { direction: null, consecutive: 0, active: false, lastAlertAt: 0 };
+        { band: null, consecutive: 0, active: false, lastAlertAt: 0 };
 
-    // No echo (-1) or beyond the obstacle threshold: CLEAR. Never an event.
+    // No echo (< 0) or beyond the obstacle window: CLEAR. Never an event.
     // Resets this device's state so a later detection produces a fresh alert.
-    if (payload.distance < 0 || payload.distance > OBSTACLE_DISTANCE_CM) {
+    if (payload.distance < 0 || payload.distance > OBSTACLE_SAFE_MAX_CM) {
         obstacleStateByDevice.set(deviceId, {
-            direction: null,
+            band: null,
             consecutive: 0,
             active: false,
             lastAlertAt: 0
@@ -526,39 +535,41 @@ function handleRadarMessage(payload) {
         return;
     }
 
-    if (state.direction !== direction) {
-        // New (or first) direction: requires a fresh 2-reading confirmation.
-        state.direction = direction;
+    const band = obstacleBand(payload.distance);
+
+    if (state.band !== band) {
+        // New (or first) band: requires a fresh 2-reading confirmation.
+        state.band = band;
         state.consecutive = 0;
         state.active = false;
     }
     state.consecutive += 1;
 
     if (state.active) {
-        // Already alerted for this obstacle direction — repeat readings are
+        // Already alerted for this obstacle band — repeat readings are
         // suppressed (no event, no SSE, no TTS).
-        console.log(`[MQTT] Radar ${direction} repeated (${payload.distance} cm) — suppressed for ${deviceId}.`);
+        console.log(`[MQTT] Radar ${band} repeated (${payload.distance} cm) — suppressed for ${deviceId}.`);
         obstacleStateByDevice.set(deviceId, state);
         return;
     }
 
     if (state.consecutive < OBSTACLE_REQUIRED_CONSECUTIVE) {
-        console.log(`[MQTT] Radar ${direction} reading (${payload.distance} cm) — confirming (${state.consecutive}/${OBSTACLE_REQUIRED_CONSECUTIVE}).`);
+        console.log(`[MQTT] Radar ${band} reading (${payload.distance} cm) — confirming (${state.consecutive}/${OBSTACLE_REQUIRED_CONSECUTIVE}).`);
         obstacleStateByDevice.set(deviceId, state);
         return;
     }
 
     // Confirmed detection, but inside the realert backstop window (rapid
-    // sensor-sector flapping): stay quiet until the window has passed.
+    // band flapping): stay quiet until the window has passed.
     if (Date.now() - state.lastAlertAt < OBSTACLE_REALERT_COOLDOWN_MS) {
-        console.log(`[MQTT] Radar ${direction} confirmed (${payload.distance} cm) — within realert cooldown, suppressed for ${deviceId}.`);
+        console.log(`[MQTT] Radar ${band} confirmed (${payload.distance} cm) — within realert cooldown, suppressed for ${deviceId}.`);
         obstacleStateByDevice.set(deviceId, state);
         return;
     }
 
     const event = {
-        alertId: nextMqttAlertId(trigger),
-        trigger,
+        alertId: nextMqttAlertId(OBSTACLE_TRIGGER),
+        trigger: OBSTACLE_TRIGGER,
         status: 'ACTIVE',
         heartRate: null,
         latitude: null,
@@ -567,7 +578,6 @@ function handleRadarMessage(payload) {
         source: 'mqtt',
         deviceId,
         distance: payload.distance,
-        angle: Number.isFinite(payload.angle) ? payload.angle : null,
         danger: payload.danger
     };
 
@@ -575,7 +585,7 @@ function handleRadarMessage(payload) {
     if (result.ok) {
         state.active = true;
         state.lastAlertAt = Date.now();
-        console.log(`[MQTT] Radar event → ${trigger} (alertId ${result.event.alertId})`);
+        console.log(`[MQTT] Radar event → ${OBSTACLE_TRIGGER} (alertId ${result.event.alertId})`);
         persistEventBestEffort(result.event);
     } else {
         console.warn(`[MQTT] Radar event skipped: ${result.error}`);
@@ -1536,8 +1546,7 @@ app.post('/api/caretaker/simulate-event', requireAuth, requireRole('CARETAKER'),
         if (!VALID_TRIGGERS.includes(trigger)) {
             return res.status(400).json({ error: 'Invalid trigger' });
         }
-        if (trigger === 'NORMAL' ||
-            trigger === 'OBSTACLE_LEFT' || trigger === 'OBSTACLE_CENTER' || trigger === 'OBSTACLE_RIGHT') {
+        if (trigger === 'NORMAL' || trigger === 'OBSTACLE') {
             return res.status(400).json({ error: 'This trigger cannot be simulated through the caretaker console' });
         }
 
@@ -1909,7 +1918,9 @@ module.exports = {
     persistEventBestEffort,
     EVENTS_WINDOW_MAX,
     TELEMETRY_QUEUE_MAX,
-    OBSTACLE_DISTANCE_CM,
+    OBSTACLE_SAFE_MAX_CM,
+    OBSTACLE_VERY_CLOSE_MAX_CM,
+    OBSTACLE_CLOSE_MAX_CM,
     OBSTACLE_REQUIRED_CONSECUTIVE,
     OBSTACLE_REALERT_COOLDOWN_MS,
     scopeRuntimeStateForDevice,

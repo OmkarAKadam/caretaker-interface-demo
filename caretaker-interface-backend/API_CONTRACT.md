@@ -33,11 +33,12 @@ Base URL: `http://localhost:3000`
 `GET /api/events/stream` is a **Server-Sent Events** (SSE) endpoint. Whenever a new event is
 created via `POST /api/events`, the backend broadcasts it to every connected SSE client.
 
-The ESP32 **does not** use SSE or MQTT — it only talks to the backend over REST. The backend
-distributes events to its clients:
+The ESP32 firmware talks to the backend in two ways: radar/telemetry readings are pushed
+over MQTT (see `README.md`), while the REST endpoints below remain the general purpose
+event/data path. The backend distributes events to its clients:
 
 ```
-ESP32 ──REST──► Backend ──SSE──► Voice Client (phone) → TTS speech
+ESP32 ──MQTT/REST──► Backend ──SSE──► Voice Client (phone) → TTS speech
                           └─► Caretaker Dashboard
 ```
 
@@ -51,7 +52,7 @@ Response headers: `Content-Type: text/event-stream`. SSE format:
 
 ```sse
 event: event
-data: {"trigger":"OBSTACLE_LEFT","alertId":"...","latitude":22.3072,"longitude":73.1812,"timestamp":"...","status":"ACTIVE"}
+data: {"trigger":"OBSTACLE","alertId":"...","distance":80,"timestamp":"...","status":"ACTIVE"}
 ```
 
 The `data` payload is the **full stored event object** (same shape as `POST /api/events`
@@ -252,7 +253,7 @@ The ESP32 reports a hardware event by `POST`-ing JSON to this endpoint.
 | Field       | Type            | Required | Notes                                               |
 |-------------|-----------------|----------|-----------------------------------------------------|
 | `alertId`   | string          | yes      | Unique non-empty id. Duplicate → `409`.            |
-| `trigger`   | string          | yes      | One of `SOS`, `HEART_RATE`, `SOS_AND_HEART_RATE`, `NORMAL`, `OBSTACLE_LEFT`, `OBSTACLE_CENTER`, `OBSTACLE_RIGHT`. |
+| `trigger`   | string          | yes      | One of `SOS`, `HEART_RATE`, `SOS_AND_HEART_RATE`, `NORMAL`, `OBSTACLE`. |
 | `status`    | string          | yes      | One of `NORMAL`, `ACTIVE`, `ACKNOWLEDGED`, `RESOLVED`. Hardware events normally enter as `ACTIVE`. |
 | `heartRate` | number \| null  | yes      | `null` allowed. MAX30102 is optional — do not require it. |
 | `latitude`  | number          | no*      | Between `-90` and `90`. *Optional if a phone location is available (enrichment); required otherwise. |
@@ -318,30 +319,37 @@ The ESP32 reports a hardware event by `POST`-ing JSON to this endpoint.
 }
 ```
 
-#### OBSTACLE_LEFT / OBSTACLE_CENTER / OBSTACLE_RIGHT — ultrasonic obstacle detection
+#### OBSTACLE — forward ultrasonic obstacle detection
 
-The **mobile voice client** listens for these on the SSE stream and speaks them aloud:
+The cap has a single fixed forward-facing ultrasonic sensor (no servo panning).
+The **mobile voice client** listens for these on the SSE stream and speaks them aloud
+with the distance in centimeters. Obstacle events carry no GPS coordinates.
 
-| Trigger            | Spoken text              |
-|--------------------|--------------------------|
-| `OBSTACLE_LEFT`    | "Obstacle on your left"  |
-| `OBSTACLE_CENTER`  | "Obstacle ahead"         |
-| `OBSTACLE_RIGHT`   | "Obstacle on your right" |
+Severity bands (parity with the backend dedup, firmware buzzer, and client TTS):
+
+| Distance            | Spoken text                                            |
+|---------------------|--------------------------------------------------------|
+| `91`–`150` cm       | "Obstacle ahead at 150 centimeters."                   |
+| `51`–`90` cm        | "Obstacle ahead at 80 centimeters. Please slow down."  |
+| `<= 50` cm          | "Warning! Obstacle very close, 40 centimeters ahead."  |
 
 ```json
 {
-  "alertId": "ALT-ESP32-OBST-001",
-  "trigger": "OBSTACLE_LEFT",
+  "alertId": "MQTT-OBSTACLE-0001",
+  "trigger": "OBSTACLE",
   "status": "ACTIVE",
   "heartRate": null,
-  "latitude": 22.3072,
-  "longitude": 73.1812,
+  "distance": 80,
   "timestamp": "2026-09-07T15:04:00"
 }
 ```
 
+Obstacle events are confirmed by the backend only after two consecutive in-range
+readings in the same severity band; repeats within a band are suppressed, and a band
+change produces a fresh alert.
+
 The event flows through the same pipeline as any other trigger:
-`POST /api/events` → backend → SSE → voice client → TTS speech.
+`MQTT radar` (or `POST /api/events`) → backend → SSE → voice client → TTS speech.
 
 ### Response codes
 
@@ -559,19 +567,23 @@ X-Device-Token: <43-char base64url token>
 
 ## Ultrasonic sensor status (API-contract resolved)
 
-The hardware includes forward and downward ultrasonic sensors intended for
-obstacle / ground-hazard detection.
+The hardware includes a fixed forward-facing ultrasonic sensor used for obstacle
+detection. The servo panning / left-right scanning is **removed**: every obstacle is
+straight ahead.
 
-**This contract now defines obstacle triggers** — the mobile voice client speaks them:
+**This contract defines a single obstacle trigger** — the mobile voice client speaks it
+with the distance in centimeters:
 
-- `OBSTACLE_LEFT` → "Obstacle on your left"
-- `OBSTACLE_CENTER` → "Obstacle ahead"
-- `OBSTACLE_RIGHT` → "Obstacle on your right"
+- `OBSTACLE` → tiered speech based on distance:
+  - `> 150 cm` — no event (CLEAR, never spoken)
+  - `91`–`150 cm` → "Obstacle ahead at 150 centimeters."
+  - `51`–`90 cm` → "Obstacle ahead at 80 centimeters. Please slow down."
+  - `<= 50 cm` → "Warning! Obstacle very close, 40 centimeters ahead."
 
-Obstacle events are normal alert events: the ESP32 `POST`s them to `/api/events`, the backend
-broadcasts them over the SSE stream, and the voice client (phone) turns them into spoken
-alerts. Ground-hazard events (curb / step detection) are **not yet defined**; if they must
-surface as events, add triggers to the validator and document them here.
+Obstacle events are normal alert events: the backend broadcasts them over the SSE stream
+after two consecutive in-range readings, and the voice client (phone) turns them into
+spoken alerts. Ground-hazard events (curb / step detection) are **not yet defined**; if
+they must surface as events, add triggers to the validator and document them here.
 
 ---
 

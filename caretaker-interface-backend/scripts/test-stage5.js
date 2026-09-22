@@ -301,8 +301,8 @@ async function testNoSyntheticEvents(device) {
         currentServerModule.getLatestRuntimeState().eventCount === before,
         `count ${currentServerModule.getLatestRuntimeState().eventCount}`);
 
-    currentServerModule.handleMqttMessage(TOPICS.SENSOR_RADAR, { direction: 'UP', distance: 10 });
-    check('H3 invalid radar creates no event',
+    currentServerModule.handleMqttMessage(TOPICS.SENSOR_RADAR, { deviceId: device.identifier, timestamp: nowIso() });
+    check('H3 invalid radar (missing distance) creates no event',
         currentServerModule.getLatestRuntimeState().eventCount === before,
         `count ${currentServerModule.getLatestRuntimeState().eventCount}`);
 

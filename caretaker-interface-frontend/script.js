@@ -184,9 +184,7 @@ function getTriggerLabel(trigger) {
         'SOS': 'Manual SOS',
         'HEART_RATE': 'Abnormal Heart Rate',
         'SOS_AND_HEART_RATE': 'SOS + Abnormal Heart Rate',
-        'OBSTACLE_LEFT': 'Obstacle Left',
-        'OBSTACLE_CENTER': 'Obstacle Ahead',
-        'OBSTACLE_RIGHT': 'Obstacle Right'
+        'OBSTACLE': 'Obstacle'
     };
     return labels[trigger] || trigger;
 }
@@ -870,15 +868,15 @@ function validateEvent(event) {
         return true;
     }
 
-    const validTriggers = ['SOS', 'HEART_RATE', 'SOS_AND_HEART_RATE', 'OBSTACLE_LEFT', 'OBSTACLE_CENTER', 'OBSTACLE_RIGHT'];
+    const validTriggers = ['SOS', 'HEART_RATE', 'SOS_AND_HEART_RATE', 'OBSTACLE'];
     if (!validTriggers.includes(event.trigger)) {
         console.warn(`[Events] Ignored invalid event: unknown trigger "${event.trigger}".`);
         return false;
     }
 
-    // Obstacle events (MQTT radar) carry no GPS, so latitude/longitude are
+    // Obstacle events (radar / MQTT) carry no GPS, so latitude/longitude are
     // optional for them. All other triggers still require coordinates.
-    const isObstacle = event.trigger === 'OBSTACLE_LEFT' || event.trigger === 'OBSTACLE_CENTER' || event.trigger === 'OBSTACLE_RIGHT';
+    const isObstacle = event.trigger === 'OBSTACLE';
 
     const required = ['alertId', 'status', 'timestamp'];
     if (!isObstacle) {
@@ -924,9 +922,7 @@ function receiveEvent(event) {
     // Obstacle detections are frequent navigation events handled live by the
     // blind-client TTS. Keep them out of the caretaker Alert History / Alert Board
     // (and out of active-alert counts) while leaving MQTT/backend processing intact.
-    if (event.trigger === 'OBSTACLE_LEFT' ||
-        event.trigger === 'OBSTACLE_CENTER' ||
-        event.trigger === 'OBSTACLE_RIGHT') {
+    if (event.trigger === 'OBSTACLE') {
         return;
     }
 

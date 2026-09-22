@@ -37,7 +37,7 @@ const HEART_RATE_COMMAND_UNAVAILABLE_ERROR = 'HEART_RATE_COMMAND_UNAVAILABLE';
 function createHeartRateMonitor(options) {
     const opts = options || {};
 
-    const normalIntervalMs = opts.normalIntervalMs || 5 * 60 * 1000;
+    const normalIntervalMs = opts.normalIntervalMs || 2 * 60 * 1000;
     const highIntervalMs = opts.highIntervalMs || 2 * 60 * 1000;
     const recoveryNormalReadings = opts.recoveryNormalReadings || 3;
     const requestTimeoutMs = opts.requestTimeoutMs || 15000;

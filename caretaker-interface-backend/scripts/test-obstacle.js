@@ -2,16 +2,19 @@
 
 // Focused integration test: MQTT obstacle (radar) deduplication.
 //
-// The ESP32 cap publishes a radar reading for every sweep sample (~1-2/s),
-// so the same obstacle appears in many consecutive readings (LEFT, LEFT,
-// LEFT, ...). handleRadarMessage now turns only ONE confirmed detection per
-// device into an event:
-//   - distance < 0 or distance > 100 cm  → CLEAR, reset that device's state
-//   - 2 consecutive same-direction reads → first event
-//   - repeats while active               → suppressed (no SSE, no TTS)
-//   - direction change + 2 reads         → one new event (after realert window)
+// The cap has a single fixed forward-facing ultrasonic sensor (no servo) and
+// publishes a radar reading per cycle (~1-2/s), so the same obstacle appears
+// in many consecutive readings. handleRadarMessage now turns only ONE
+// confirmed detection per severity band into an event:
+//   - distance < 0 or distance > 150 cm → CLEAR, reset that device's state
+//   - 2 consecutive same-band reads      → first event
+//   - repeats within the same band       → suppressed (no SSE, no TTS)
+//   - band change + 2 reads              → one new event (after realert window)
 //   - clear → re-detect                  → a fresh event (two separate alerts)
 //   - per-device state, keyed by deviceId (mirrors the heart-rate pattern)
+//
+// Bands (parity with firmware buzzer + Blind Client TTS):
+//   VERY_CLOSE <= 50 cm, CLOSE 51..90 cm, MODERATE 91..150 cm.
 //
 // Runs IN-PROCESS against the real server module (MQTT disabled), using ONLY
 // the local PostgreSQL database for the fire-and-forget persistence mirror
@@ -51,10 +54,9 @@ function nowIso() {
     return new Date().toISOString();
 }
 
-function radar(deviceId, direction, distance) {
+function radar(deviceId, distance) {
     currentServerModule.handleMqttMessage(TOPICS.SENSOR_RADAR, {
         deviceId,
-        direction,
         distance,
         timestamp: nowIso()
     });
@@ -124,94 +126,101 @@ async function main() {
         const K = `${PREFIX}${ts}-K`;
         const L = `${PREFIX}${ts}-L`;
         const M = `${PREFIX}${ts}-M`;
+        const N = `${PREFIX}${ts}-N`;
 
-        // ── 1. Repeated same-direction readings → ONE event ────────
+        // ── 1. Repeated same-band readings → ONE event ─────────────
         let before = eventCount();
-        radar(A, 'LEFT', 45); radar(A, 'LEFT', 45); radar(A, 'LEFT', 45); radar(A, 'LEFT', 45); radar(A, 'LEFT', 45);
-        check('repeated: 5× LEFT creates exactly 1 event', eventCount() - before === 1, `delta ${eventCount() - before}`);
-        check('repeated: state active LEFT', obstacleState(A) && obstacleState(A).active === true && obstacleState(A).direction === 'LEFT',
+        radar(A, 45); radar(A, 45); radar(A, 45); radar(A, 45); radar(A, 45);
+        check('repeated: 5× 45 cm (VERY_CLOSE) creates exactly 1 event', eventCount() - before === 1, `delta ${eventCount() - before}`);
+        check('repeated: state active VERY_CLOSE', obstacleState(A) && obstacleState(A).active === true && obstacleState(A).band === 'VERY_CLOSE',
             JSON.stringify(obstacleState(A)));
 
-        // ── 2. Direction change → ONE new event ────────────────────
+        // ── 2. Band change → ONE new event ─────────────────────────
         before = eventCount();
-        radar(B, 'LEFT', 45); radar(B, 'LEFT', 45);
-        check('direction: LEFT×2 confirms 1 event', eventCount() - before === 1, `delta ${eventCount() - before}`);
+        radar(B, 120); radar(B, 120); // MODERATE ×2
+        check('band: MODERATE×2 confirms 1 event', eventCount() - before === 1, `delta ${eventCount() - before}`);
         await sleep(80); // pass the realert window
-        radar(B, 'CENTER', 40); radar(B, 'CENTER', 40);
-        check('direction: CENTER×2 after window creates new event', eventCount() - before === 2, `delta ${eventCount() - before}`);
-        check('direction: state active CENTER', obstacleState(B) && obstacleState(B).direction === 'CENTER', JSON.stringify(obstacleState(B)));
+        radar(B, 30); radar(B, 30); // VERY_CLOSE ×2
+        check('band: VERY_CLOSE×2 after window creates new event', eventCount() - before === 2, `delta ${eventCount() - before}`);
+        check('band: state active VERY_CLOSE', obstacleState(B) && obstacleState(B).band === 'VERY_CLOSE', JSON.stringify(obstacleState(B)));
 
-        // ── 3. Rapid sector flapping stays quiet, recovers ─────────
+        // ── 3. Rapid band flapping stays quiet, recovers ────────────
         before = eventCount();
-        radar(C, 'LEFT', 45); radar(C, 'LEFT', 45);
-        check('flapping: LEFT×2 confirms 1 event', eventCount() - before === 1, `delta ${eventCount() - before}`);
+        radar(C, 80); radar(C, 80); // CLOSE ×2
+        check('flapping: CLOSE×2 confirms 1 event', eventCount() - before === 1, `delta ${eventCount() - before}`);
         // Alternate confirmations inside the backstop window.
-        radar(C, 'CENTER', 42); radar(C, 'CENTER', 42);
-        radar(C, 'LEFT', 45); radar(C, 'LEFT', 45);
-        radar(C, 'CENTER', 42); radar(C, 'CENTER', 42);
+        radar(C, 40); radar(C, 40);
+        radar(C, 80); radar(C, 80);
+        radar(C, 40); radar(C, 40);
         check('flapping: alternation inside window adds no event', eventCount() - before === 1, `delta ${eventCount() - before}`);
         await sleep(80);
-        radar(C, 'CENTER', 42); radar(C, 'CENTER', 42);
-        check('flapping: sustained direction after window fires', eventCount() - before === 2, `delta ${eventCount() - before}`);
+        radar(C, 40); radar(C, 40);
+        check('flapping: sustained band after window fires', eventCount() - before === 2, `delta ${eventCount() - before}`);
 
-        // ── 4. Clear then redetect → two separate alerts ───────────
+        // ── 4. Clear then redetect → two separate alerts ────────────
         before = eventCount();
-        radar(D, 'LEFT', 50); radar(D, 'LEFT', 50);
-        check('redetect: first LEFT×2 creates event', eventCount() - before === 1, `delta ${eventCount() - before}`);
-        radar(D, 'LEFT', 180); // >100 → CLEAR, no event
+        radar(D, 100); radar(D, 100); // MODERATE ×2
+        check('redetect: first MODERATE×2 creates event', eventCount() - before === 1, `delta ${eventCount() - before}`);
+        radar(D, 180); // >150 → CLEAR, no event
         check('redetect: clear reading creates no event', eventCount() - before === 1, `delta ${eventCount() - before}`);
-        check('redetect: state reset after clear', obstacleState(D) && obstacleState(D).direction === null, JSON.stringify(obstacleState(D)));
-        radar(D, 'LEFT', 50); radar(D, 'LEFT', 50);
-        check('redetect: LEFT after clear creates fresh event', eventCount() - before === 2, `delta ${eventCount() - before}`);
+        check('redetect: state reset after clear', obstacleState(D) && obstacleState(D).band === null, JSON.stringify(obstacleState(D)));
+        radar(D, 100); radar(D, 100);
+        check('redetect: detection after clear creates fresh event', eventCount() - before === 2, `delta ${eventCount() - before}`);
 
-        // ── 5. distance < 0 never creates an event, resets state ───
+        // ── 5. distance < 0 never creates an event, resets state ────
         before = eventCount();
-        radar(E, 'LEFT', -1); radar(E, 'LEFT', -1); radar(E, 'CENTER', -1);
+        radar(E, -1); radar(E, -1); radar(E, -0.5);
         check('neg: distance -1 creates no event', eventCount() - before === 0, `delta ${eventCount() - before}`);
-        radar(E, 'LEFT', 45); radar(E, 'LEFT', 45);
+        radar(E, 45); radar(E, 45);
         check('neg: normal detection after -1 works', eventCount() - before === 1, `delta ${eventCount() - before}`);
 
-        // ── 6. distance > 100 never creates an event, resets state ─
+        // ── 6. distance > 150 never creates an event, resets state ──
         before = eventCount();
-        radar(F, 'LEFT', 120); radar(F, 'LEFT', 155); radar(F, 'RIGHT', 100.5);
-        check('far: distance >100 creates no event', eventCount() - before === 0, `delta ${eventCount() - before}`);
-        radar(F, 'LEFT', 45); radar(F, 'LEFT', 45);
-        check('far: normal detection after >100 works', eventCount() - before === 1, `delta ${eventCount() - before}`);
+        radar(F, 160); radar(F, 1000); radar(F, 150.1);
+        check('far: distance >150 creates no event', eventCount() - before === 0, `delta ${eventCount() - before}`);
+        radar(F, 45); radar(F, 45);
+        check('far: normal detection after >150 works', eventCount() - before === 1, `delta ${eventCount() - before}`);
 
-        // ── 7. Per-device isolation ────────────────────────────────
+        // ── 7. Per-device isolation ─────────────────────────────────
         before = eventCount();
-        radar(G, 'LEFT', 45); radar(G, 'LEFT', 45); // G fires
-        radar(H, 'CENTER', 40); radar(H, 'CENTER', 40); // H fires independently
+        radar(G, 80); radar(G, 80); // G fires (CLOSE)
+        radar(H, 140); radar(H, 140); // H fires independently (MODERATE)
         check('isolation: G and H each confirm 1 event', eventCount() - before === 2, `delta ${eventCount() - before}`);
         await sleep(80);
-        radar(G, 'CENTER', 40); radar(G, 'CENTER', 40); // G direction change
-        check('isolation: G fires its own direction change', eventCount() - before === 3, `delta ${eventCount() - before}`);
-        check('isolation: G state CENTER', obstacleState(G) && obstacleState(G).direction === 'CENTER', JSON.stringify(obstacleState(G)));
-        check('isolation: H state CENTER untouched', obstacleState(H) && obstacleState(H).direction === 'CENTER', JSON.stringify(obstacleState(H)));
+        radar(G, 40); radar(G, 40); // G band change (CLOSE → VERY_CLOSE)
+        check('isolation: G fires its own band change', eventCount() - before === 3, `delta ${eventCount() - before}`);
+        check('isolation: G state VERY_CLOSE', obstacleState(G) && obstacleState(G).band === 'VERY_CLOSE', JSON.stringify(obstacleState(G)));
+        check('isolation: H state MODERATE untouched', obstacleState(H) && obstacleState(H).band === 'MODERATE', JSON.stringify(obstacleState(H)));
 
-        // ── 8. 100 cm boundary ─────────────────────────────────────
+        // ── 8. Band boundaries ─────────────────────────────────────
         before = eventCount();
-        radar(I, 'LEFT', 100); radar(I, 'LEFT', 100); // == threshold → obstacle
-        check('boundary: 100 cm is an obstacle', eventCount() - before === 1, `delta ${eventCount() - before}`);
-        radar(J, 'LEFT', 100.1); radar(J, 'LEFT', 100.1); // > threshold → clear
-        check('boundary: 100.1 cm is clear', eventCount() - before === 1, `delta ${eventCount() - before}`);
-        radar(K, 'CENTER', 99.9); radar(K, 'CENTER', 99.9); // < threshold → obstacle
-        check('boundary: 99.9 cm is an obstacle', eventCount() - before === 2, `delta ${eventCount() - before}`);
+        radar(I, 150); radar(I, 150); // == safe max → MODERATE obstacle
+        check('boundary: 150 cm is an obstacle', eventCount() - before === 1, `delta ${eventCount() - before}`);
+        radar(J, 150.1); radar(J, 150.1); // > safe max → clear
+        check('boundary: 150.1 cm is clear', eventCount() - before === 1, `delta ${eventCount() - before}`);
+        radar(K, 90); radar(K, 90); // == close max → CLOSE obstacle
+        check('boundary: 90 cm is an obstacle', eventCount() - before === 2, `delta ${eventCount() - before}`);
+        radar(L, 90.1); radar(L, 90.1); // just above → MODERATE obstacle
+        check('boundary: 90.1 cm is still an obstacle (MODERATE)', eventCount() - before === 3, `delta ${eventCount() - before}`);
+        radar(M, 50); radar(M, 50); // == very-close max → VERY_CLOSE obstacle
+        check('boundary: 50 cm is an obstacle', eventCount() - before === 4, `delta ${eventCount() - before}`);
+        radar(N, 50.1); radar(N, 50.1); // just above → CLOSE obstacle
+        check('boundary: 50.1 cm is still an obstacle (CLOSE)', eventCount() - before === 5, `delta ${eventCount() - before}`);
 
-        // ── 9. Stability: 2 consecutive readings required ──────────
+        // ── 9. Stability: 2 consecutive readings required ───────────
         before = eventCount();
-        radar(L, 'LEFT', 45); // single reading, not yet confirmed
-        check('stable: single LEFT creates no event', eventCount() - before === 0, `delta ${eventCount() - before}`);
-        radar(L, 'LEFT', 180); // CLEAR aborts the confirmation.
-        radar(L, 'CENTER', 40); // single CENTER, not yet confirmed.
+        radar(B, 70); // single reading, not yet confirmed
+        check('stable: single reading creates no event', eventCount() - before === 0, `delta ${eventCount() - before}`);
+        radar(B, 190); // CLEAR aborts the confirmation.
+        radar(B, 20); // single VERY_CLOSE, not yet confirmed.
         check('stable: interrupted confirmation creates no event', eventCount() - before === 0, `delta ${eventCount() - before}`);
-        radar(L, 'LEFT', 45); radar(L, 'LEFT', 45);
+        radar(B, 70); radar(B, 70);
         check('stable: a fresh 2× run still confirms', eventCount() - before === 1, `delta ${eventCount() - before}`);
 
-        // ── 10. Rapid single-reading alternation → no events ───────
+        // ── 10. Rapid single-reading alternation → no events ────────
         before = eventCount();
-        radar(M, 'LEFT', 45); radar(M, 'CENTER', 40); radar(M, 'LEFT', 45); radar(M, 'CENTER', 40);
-        radar(M, 'LEFT', 45); radar(M, 'CENTER', 40); radar(M, 'LEFT', 45); radar(M, 'CENTER', 40);
+        radar(N, 80); radar(N, 40); radar(N, 80); radar(N, 40);
+        radar(N, 80); radar(N, 40); radar(N, 80); radar(N, 40);
         check('alternate: single-reading flapping creates no event', eventCount() - before === 0, `delta ${eventCount() - before}`);
 
         // ── Persistence mirror sanity (fire-and-forget rows landed) ─

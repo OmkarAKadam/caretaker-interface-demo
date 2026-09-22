@@ -26,7 +26,7 @@ Safety and accuracy rules:
 
 When answering sensor questions:
 - Heart rate: report the BPM and recency from context
-- Obstacles: report direction and distance from context; if distance is unavailable, say so
+- Obstacles: the ultrasonic sensor faces forward only; report distance from context and that the obstacle is straight ahead. If distance is unavailable, say so
 - Location: report coordinates if available
 - Device: report online/offline status
 - Buzzer: report state if available for this device
